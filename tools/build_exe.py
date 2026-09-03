@@ -36,7 +36,7 @@ EXCLUDES = [
 
 def build() -> Path:
     try:
-        import PyInstaller  # noqa: F401
+        __import__("PyInstaller")
     except ImportError:
         print("PyInstaller がありません。インストールします…")
         subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)

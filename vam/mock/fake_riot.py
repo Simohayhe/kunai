@@ -19,44 +19,49 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from .. import paths
+from ..riot import process as riot_process
+
+# 実機 (Riot Client 134.x) の RiotGamesPrivateSettings.yaml と同じ形。
+# 実物は cookie 名も値も引用符で囲み、名前付きマッピングで持ち、
+# 寿命は JWT の exp ではなく expiryTime フィールドに入っている。
+# ここを本物に合わせておかないと、テストが通っても実機で動かない。
+_COOKIE_BLOCK = """\
+    {name}:
+        domain: "riotgames.com"
+        expiryTime: {expiry}
+        hostOnly: false
+        httpOnly: true
+        name: "{name}"
+        path: "/"
+        persistent: true
+        secureOnly: true
+        value: "{value}"
+"""
 
 PRIVATE_SETTINGS_TEMPLATE = """\
+psl:
+    authorization:
+        riot-client: null
+riot-login:
+    persist: null
+rso-authenticator:
+"""
+
+# 「ログイン情報を保存する」が無効なとき。tdid だけがあって ssid は無い
+LOGGED_OUT_TEMPLATE = PRIVATE_SETTINGS_TEMPLATE + _COOKIE_BLOCK.format(
+    name="tdid", expiry=0, value="PLACEHOLDER"
+)
+
+# 一部の版はリスト形式で持つ。パーサがどちらでも読めることを確かめる用
+LIST_FORM_TEMPLATE = """\
 riot-login:
   persist:
     session:
       cookies:
       - domain: auth.riotgames.com
-        hostOnly: true
-        httpOnly: true
-        name: tdid
-        path: /
-        persistent: true
-        secureOnly: true
-        value: {tdid}
-      - domain: auth.riotgames.com
-        hostOnly: true
-        httpOnly: true
         name: ssid
         path: /
-        persistent: true
-        secureOnly: true
         value: {ssid}
-      - domain: auth.riotgames.com
-        hostOnly: true
-        httpOnly: true
-        name: clid
-        path: /
-        persistent: true
-        secureOnly: true
-        value: {clid}
-      - domain: auth.riotgames.com
-        hostOnly: true
-        httpOnly: true
-        name: csid
-        path: /
-        persistent: true
-        secureOnly: true
-        value: {csid}
 """
 
 CLIENT_SETTINGS = """\
@@ -72,18 +77,45 @@ def _b64(obj: dict) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def make_jwt(puuid: str, ttl_days: int = 30, **extra) -> str:
-    """署名は飾り。中身の sub/exp だけが本物と同じ形になっていればよい。"""
+def make_jwt(puuid: str, ttl_days: int = 30, no_exp: bool = False,
+             no_sub: bool = False, **extra) -> str:
+    """署名は飾り。中身のクレームが本物と同じ形になっていればよい。
+
+    実機を見て分かったこと（モックが違っているとテストが嘘をつく）:
+      - tdid は exp も sub も持たない。クレームは iat / id / nonce だけ
+      - したがって tdid の寿命は YAML の expiryTime にしか無い
+    no_exp / no_sub でその状況を再現する。
+    """
     header = _b64({"alg": "RS256", "kid": "mock", "typ": "JWT"})
-    payload = _b64({
-        "sub": puuid,
+    claims = {
         "iss": "https://auth.riotgames.com",
-        "exp": int(time.time()) + ttl_days * 86400,
         "iat": int(time.time()),
         **extra,
-    })
+    }
+    if not no_sub:
+        claims["sub"] = puuid
+    if not no_exp:
+        claims["exp"] = int(time.time()) + ttl_days * 86400
+    payload = _b64(claims)
     sig = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode().rstrip("=")
     return f"{header}.{payload}.{sig}"
+
+
+def session_yaml(puuid: str, ttl_days: int = 30) -> str:
+    """ログイン済み状態の RiotGamesPrivateSettings.yaml を組み立てる。"""
+    expiry = int(time.time() + ttl_days * 86400)
+    blocks = "".join(
+        _COOKIE_BLOCK.format(name=name, expiry=expiry, value=value)
+        for name, value in (
+            ("clid", make_jwt(puuid, ttl_days, cid="clid")),
+            ("csid", make_jwt(puuid, ttl_days, cid="csid")),
+            ("ssid", make_jwt(puuid, ttl_days)),
+            # tdid は端末 ID。実物と同じく sub も exp も持たせない
+            ("tdid", make_jwt(puuid, 0, no_exp=True, no_sub=True,
+                              id=secrets.token_hex(8), nonce=secrets.token_hex(8))),
+        )
+    )
+    return PRIVATE_SETTINGS_TEMPLATE + blocks
 
 
 class FakeRiotEnv:
@@ -117,14 +149,8 @@ class FakeRiotEnv:
         return puuid
 
     def write_session(self, puuid: str, ttl_days: int = 30) -> str:
-        content = PRIVATE_SETTINGS_TEMPLATE.format(
-            ssid=make_jwt(puuid, ttl_days),
-            clid=make_jwt(puuid, ttl_days, cid="clid"),
-            csid=make_jwt(puuid, ttl_days, cid="csid"),
-            tdid=make_jwt(puuid, 365, cid="tdid"),
-        )
         (self.client_dir / "Data" / "RiotGamesPrivateSettings.yaml").write_text(
-            content, encoding="utf-8"
+            session_yaml(puuid, ttl_days), encoding="utf-8"
         )
         (self.client_dir / "Data" / "RiotClientPrivateSettings.yaml").write_text(
             "private:\n  settings: {}\n", encoding="utf-8"
@@ -164,6 +190,15 @@ class FakeRiotEnv:
             lock.unlink()
 
     # -- paths.py の差し替え ------------------------------------------------
+    # -- 起動中プロセスの模擬 ----------------------------------------------
+    def set_running(self, *names: str) -> None:
+        """モック環境で「起動している」ことにするプロセス名。"""
+        riot_process._MOCK_RUNNING.clear()
+        riot_process._MOCK_RUNNING.update(names)
+
+    def running(self) -> set[str]:
+        return set(riot_process._MOCK_RUNNING)
+
     def activate(self) -> "FakeRiotEnv":
         for key, value in (
             (paths.ENV_OVERRIDE_LOCALAPPDATA, str(self.local_appdata)),
@@ -174,6 +209,7 @@ class FakeRiotEnv:
         return self
 
     def deactivate(self) -> None:
+        riot_process._MOCK_RUNNING.clear()
         for key, old in self._saved_env.items():
             if old is None:
                 os.environ.pop(key, None)

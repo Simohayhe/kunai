@@ -239,6 +239,114 @@ def test_service() -> None:
         check("ログアウト後は現在アカウント無し", svc.current_account() is None)
 
 
+def test_real_file_format() -> None:
+    """実機 (Riot Client 134.x) から確認した YAML の形をそのまま固定する。
+
+    ここが崩れると、テストが全部通っても実機では 1 つも cookie を読めない。
+    実際に一度そうなった。
+    """
+    section("実ファイル形式")
+    from vam.mock.fake_riot import LIST_FORM_TEMPLATE, make_jwt
+    from vam.riot import session
+
+    puuid = "dddd0000-0000-0000-0000-00000000000d"
+    expiry = int(time.time() + 20 * 86400)
+
+    # 実機そのままの形。名前も値も引用符付き、名前付きマッピング、
+    # tdid は exp クレームを持たず expiryTime だけが寿命を持つ。
+    real = f'''psl:
+    authorization:
+        riot-client: null
+riot-login:
+    persist: null
+rso-authenticator:
+    ssid:
+        domain: "riotgames.com"
+        expiryTime: {expiry}
+        hostOnly: false
+        httpOnly: true
+        name: "ssid"
+        path: "/"
+        persistent: true
+        secureOnly: true
+        value: "{make_jwt(puuid, 5)}"
+    tdid:
+        domain: "riotgames.com"
+        expiryTime: {int(time.time() + 365 * 86400)}
+        hostOnly: false
+        httpOnly: true
+        name: "tdid"
+        path: "/"
+        persistent: true
+        secureOnly: true
+        value: "{make_jwt(puuid, 0, no_exp=True, no_sub=True, id="x", nonce="y")}"
+'''
+    blobs = {"Data/RiotGamesPrivateSettings.yaml": real.encode("utf-8")}
+    info = session.inspect_blobs(blobs)
+    check("引用符付きの cookie 名を読める", "ssid" in info.cookies, str(sorted(info.cookies)))
+    check("引用符を値から剥がす", not info.cookies["ssid"].startswith('"'))
+    check("puuid を読める", info.puuid == puuid)
+    check("有効判定", info.valid and not info.expired)
+    # JWT の exp は 5 日だが、cookie の寿命は expiryTime の 20 日
+    check("expiryTime を JWT の exp より優先する",
+          19 < info.expires_in_days <= 20, f"{info.expires_in_days}")
+
+    # ssid の JWT が exp を持たない場合でも、expiryTime から期限を出せる
+    no_exp_ssid = f'''rso-authenticator:
+    ssid:
+        expiryTime: {expiry}
+        name: "ssid"
+        value: "{make_jwt(puuid, 0, no_exp=True)}"
+'''
+    no_exp_info = session.inspect_blobs({"x.yaml": no_exp_ssid.encode("utf-8")})
+    check("exp なし JWT でも例外にならない", no_exp_info.puuid == puuid)
+    check("exp が無くても expiryTime から期限が出る",
+          19 < no_exp_info.expires_in_days <= 20, f"{no_exp_info.expires_in_days}")
+
+    # 「ログイン情報を保存する」が無効なとき。実機で確認した形で、
+    # riot-login.persist が null、cookie は tdid だけ。
+    logged_out = {"x.yaml": ("rso-authenticator:\n    tdid:\n"
+                             + real.split('    tdid:\n')[1]).encode("utf-8")}
+    out_info = session.inspect_blobs(logged_out)
+    check("ログアウト状態には ssid が無い", "ssid" not in out_info.cookies,
+          str(sorted(out_info.cookies)))
+    check("ログアウト状態は無効と判定", not out_info.valid)
+
+    # 別形式（リスト）でも読める
+    list_form = {"x.yaml": LIST_FORM_TEMPLATE.format(
+        ssid=make_jwt(puuid, 12)).encode("utf-8")}
+    list_info = session.inspect_blobs(list_form)
+    check("リスト形式も読める", list_info.cookies.get("ssid") is not None)
+    check("リスト形式でも puuid を読める", list_info.puuid == puuid)
+    check("リスト形式は JWT の exp を使う",
+          11 < list_info.expires_in_days <= 12, f"{list_info.expires_in_days}")
+
+
+def test_process_isolation() -> None:
+    """モック環境では実プロセスに触らないこと。
+
+    ここが抜けていたせいで、テストが実機の Riot Client を落とした。
+    """
+    section("プロセス操作の隔離")
+    from vam.mock.fake_riot import FakeRiotEnv
+    from vam.riot import process
+
+    check("素の状態はモードでない", not process.mock_mode())
+    env = FakeRiotEnv()
+    env.build()
+    with env:
+        check("モック中はモックモード", process.mock_mode())
+        env.set_running("RiotClientServices.exe", "VALORANT.exe")
+        check("模擬プロセスが見える", process.running() == ["RiotClientServices.exe",
+                                                            "VALORANT.exe"])
+        check("game_running を判定", process.game_running())
+        stopped = process.stop_all()
+        check("停止できる", set(stopped) == {"RiotClientServices.exe", "VALORANT.exe"})
+        check("停止後は空", process.running() == [])
+    check("抜けたらモードが戻る", not process.mock_mode())
+    check("模擬プロセスは片付く", not process._MOCK_RUNNING)
+
+
 def test_session_renewal() -> None:
     section("セッションの延長（cookie ローテーション）")
     import types
@@ -258,27 +366,47 @@ def test_session_renewal() -> None:
     check("延長前の残り日数", 9 < before.expires_in_days <= 10,
           f"{before.expires_in_days}")
 
+    # 実機の cookie は寿命を expiryTime にしか持たないことがあるので、
+    # value だけ差し替えても期限は動かない。これが正しい挙動。
     fresh = {"ssid": make_jwt(puuid, 30), "clid": make_jwt(puuid, 30, cid="clid")}
-    rotated = session.update_cookies(blobs, fresh)
+    value_only = session.inspect_blobs(session.update_cookies(blobs, fresh))
+    check("value だけ差し替えても期限は動かない",
+          9 < value_only.expires_in_days <= 10, f"{value_only.expires_in_days}")
+    check("value だけでも値は差し替わる", value_only.cookies["ssid"] == fresh["ssid"])
+
+    new_expiry = time.time() + 30 * 86400
+    rotated = session.update_cookies(blobs, fresh, {"ssid": new_expiry,
+                                                    "clid": new_expiry})
     after = session.inspect_blobs(rotated)
-    check("cookie 差し替えで期限が延びる", 29 < after.expires_in_days <= 30,
-          f"{after.expires_in_days}")
+    check("expiryTime も更新すると期限が延びる",
+          29 < after.expires_in_days <= 30, f"{after.expires_in_days}")
     check("差し替えても puuid は同じ", after.puuid == puuid)
     check("指定した cookie だけ差し替わる", after.cookies["ssid"] == fresh["ssid"])
     check("指定しない cookie は元のまま",
           after.cookies["csid"] == before.cookies["csid"])
-    check("YAML の構造は壊れない",
-          rotated[list(rotated)[0]].decode().count("name:") ==
-          blobs[list(blobs)[0]].decode().count("name:"))
 
-    # --- 同名 cookie は exp が最も先のものを採る ---
+    text_before = blobs[list(blobs)[0]].decode()
+    text_after = rotated[list(rotated)[0]].decode()
+    check("YAML の構造は壊れない",
+          text_after.count("name:") == text_before.count("name:")
+          and text_after.count("expiryTime:") == text_before.count("expiryTime:"))
+    check("行数が変わらない",
+          len(text_after.splitlines()) == len(text_before.splitlines()))
+    check("引用符が保たれる", f'value: "{fresh["ssid"]}"' in text_after)
+    check("書き戻した YAML が再パースできる",
+          __import__("yaml").safe_load(text_after) is not None)
+
+    # --- 同名 cookie は期限が最も先のものを採る ---
     old_ssid, new_ssid = make_jwt(puuid, 5), make_jwt(puuid, 40)
-    jar = [types.SimpleNamespace(name="ssid", value=old_ssid),
-           types.SimpleNamespace(name="ssid", value=new_ssid),
-           types.SimpleNamespace(name="tdid", value="plain-value")]
-    collected = auth._collect_cookies(jar)
+    jar = [types.SimpleNamespace(name="ssid", value=old_ssid, expires=None),
+           types.SimpleNamespace(name="ssid", value=new_ssid, expires=None),
+           types.SimpleNamespace(name="tdid", value="plain-value",
+                                 expires=int(time.time() + 365 * 86400))]
+    collected, expiries = auth._collect_cookies(jar)
     check("重複 cookie は新しい方を採る", collected["ssid"] == new_ssid)
     check("JWT でない cookie も拾う", collected["tdid"] == "plain-value")
+    check("cookie 自身の expires を拾う", expiries["tdid"] > time.time())
+    check("exp しか無い cookie は JWT から期限を採る", expiries["ssid"] > time.time())
 
     # --- サービス層: 再認証で保管庫の cookie が更新される ---
     vault = Vault(Path(tempfile.mkdtemp()))
@@ -289,8 +417,12 @@ def test_session_renewal() -> None:
         vault.write_session_blob(account.id, rel, data)
 
     def fake_reauth(cookies, **kw):
-        return auth.AuthResult(access_token="tok", puuid=puuid,
-                               cookies={"ssid": make_jwt(puuid, 30)})
+        # 実機同様、値と期限の両方を返す
+        return auth.AuthResult(
+            access_token="tok", puuid=puuid,
+            cookies={"ssid": make_jwt(puuid, 30)},
+            cookie_expiries={"ssid": time.time() + 30 * 86400},
+        )
 
     original = auth.reauth_with_cookies
     from vam import service as service_module
@@ -306,8 +438,11 @@ def test_session_renewal() -> None:
 
         # 期限が縮む応答は無視する
         def shrinking_reauth(cookies, **kw):
-            return auth.AuthResult(access_token="tok", puuid=puuid,
-                                   cookies={"ssid": make_jwt(puuid, 1)})
+            return auth.AuthResult(
+                access_token="tok", puuid=puuid,
+                cookies={"ssid": make_jwt(puuid, 1)},
+                cookie_expiries={"ssid": time.time() + 86400},
+            )
         service_module.auth.reauth_with_cookies = shrinking_reauth
         result = svc.renew_session(account)
         check("期限が縮む応答は書き戻さない", not result["extended"])
@@ -316,8 +451,11 @@ def test_session_renewal() -> None:
 
         # 壊れた cookie も無視する
         def broken_reauth(cookies, **kw):
-            return auth.AuthResult(access_token="tok", puuid=puuid,
-                                   cookies={"ssid": "not-a-jwt"})
+            return auth.AuthResult(
+                access_token="tok", puuid=puuid,
+                cookies={"ssid": "not-a-jwt"},
+                cookie_expiries={"ssid": time.time() + 999 * 86400},
+            )
         service_module.auth.reauth_with_cookies = broken_reauth
         svc.renew_session(account)
         check("壊れた cookie は書き戻さない",
@@ -585,7 +723,8 @@ def test_ui() -> None:
 def main() -> int:
     print("VALORANT Account Manager — 通しテスト")
     for fn in (test_crypto, test_storage, test_session, test_localapi,
-               test_service, test_session_renewal, test_api_parsing, test_auth_helpers,
+               test_service, test_real_file_format, test_process_isolation,
+               test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_ui):
         try:
             fn()

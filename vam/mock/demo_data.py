@@ -11,7 +11,7 @@ from ..models import Account, InventoryInfo, RankInfo, WalletInfo
 from ..riot.api import CompetitiveUpdate
 from ..riot.content import ContentCache, ContentError
 from ..storage import Vault
-from .fake_riot import PRIVATE_SETTINGS_TEMPLATE, make_jwt
+from .fake_riot import session_yaml
 
 SAMPLES = [
     dict(label="メイン", riot_id="Simohaya#JP1", region="ap", color="#ff4655",
@@ -84,19 +84,10 @@ def seed(vault: Vault) -> list[Account]:
         if d["session_days"]:
             vault.write_session_blob(
                 account.id, "Data/RiotGamesPrivateSettings.yaml",
-                fake_session_yaml(account.puuid, d["session_days"]).encode("utf-8"),
+                session_yaml(account.puuid, d["session_days"]).encode("utf-8"),
             )
         created.append(account)
     return created
-
-
-def fake_session_yaml(puuid: str, ttl_days: int) -> str:
-    return PRIVATE_SETTINGS_TEMPLATE.format(
-        ssid=make_jwt(puuid, ttl_days),
-        clid=make_jwt(puuid, ttl_days, cid="clid"),
-        csid=make_jwt(puuid, ttl_days, cid="csid"),
-        tdid=make_jwt(puuid, 365, cid="tdid"),
-    )
 
 
 # 戦績タブの見た目確認用。実データは認証が要るのでデモでは使えない

@@ -93,6 +93,7 @@ class AuthResult:
     region: str = ""
     expires_at: float = 0.0
     cookies: dict[str, str] = field(default_factory=dict)
+    cookie_expiries: dict[str, float] = field(default_factory=dict)
 
     @property
     def riot_id(self) -> str:
@@ -113,19 +114,25 @@ class AuthResult:
         return h
 
 
-def _collect_cookies(jar) -> dict[str, str]:
-    """cookie jar を name -> value に畳む。
+def _collect_cookies(jar) -> tuple[dict[str, str], dict[str, float]]:
+    """cookie jar を name -> value と name -> 有効期限 に畳む。
 
     元の cookie とレスポンスの Set-Cookie が domain 違いで併存することがあるので、
-    同名なら JWT の exp が最も先のものを採る（＝いちばん新しい方）。
+    同名なら有効期限が最も先のものを採る（＝いちばん新しい方）。
+    期限は cookie 自身の expires を優先し、無ければ JWT の exp を使う。
+    実ファイルの cookie は JWT に exp を持たないことがある。
     """
-    best: dict[str, tuple[float, str]] = {}
+    best: dict[str, tuple[float, str, float]] = {}
     for c in jar:
-        exp = float(decode_jwt_payload(c.value).get("exp", 0) or 0)
+        cookie_exp = float(getattr(c, "expires", None) or 0)
+        jwt_exp = float(decode_jwt_payload(c.value).get("exp", 0) or 0)
+        rank = cookie_exp or jwt_exp
         current = best.get(c.name)
-        if current is None or exp >= current[0]:
-            best[c.name] = (exp, c.value)
-    return {name: value for name, (_, value) in best.items()}
+        if current is None or rank >= current[0]:
+            best[c.name] = (rank, c.value, cookie_exp or jwt_exp)
+    values = {name: v for name, (_, v, _e) in best.items()}
+    expiries = {name: e for name, (_, _v, e) in best.items() if e}
+    return values, expiries
 
 
 def _extract_fragment_tokens(uri: str) -> dict[str, str]:
@@ -170,11 +177,13 @@ def reauth_with_cookies(cookies: dict[str, str],
             "セッションを保存し直してください。"
         )
 
+    values, expiries = _collect_cookies(s.cookies)
     result = AuthResult(
         access_token=tokens["access_token"],
         id_token=tokens.get("id_token", ""),
         expires_at=time.time() + float(tokens.get("expires_in", 3600)),
-        cookies=_collect_cookies(s.cookies),
+        cookies=values,
+        cookie_expiries=expiries,
     )
     _fill_details(s, result, timeout)
     return result

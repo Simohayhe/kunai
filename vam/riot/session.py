@@ -18,9 +18,16 @@ from .. import paths
 
 # cookie の value に入っている JWT
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+")
-# "name: ssid" と "value: xxx" が近接して現れる YAML ブロック
+
+# "name: ssid" と "value: xxx" が近接して現れる YAML ブロック。
+# 実際の Riot Client は name も value も引用符で囲むので、引用符は任意にする。
+# 書き戻し (update_cookies) はこの正規表現で行う。ファイルを丸ごと
+# 書き直すとフォーマットが変わって Riot 側が読めなくなりかねないため、
+# 値の部分だけを差し替える。
 _COOKIE_RE = re.compile(
-    r"name:\s*(?P<name>[\w-]+)(?P<between>(?:.|\n){0,400}?)value:\s*(?P<value>\S+)"
+    r"""name:\s*(?P<nq>["']?)(?P<name>[\w-]+)(?P=nq)"""
+    r"""(?P<between>(?:.|\n){0,400}?)"""
+    r"""value:\s*(?P<vq>["']?)(?P<value>[^"'\s]+)(?P=vq)"""
 )
 
 INTERESTING_COOKIES = ("ssid", "clid", "csid", "tdid", "sub")
@@ -66,53 +73,164 @@ class SessionInfo:
         return max(0.0, (self.expires_at - time.time()) / 86400)
 
 
+def _walk_cookies(node, found: list[dict]) -> None:
+    """入れ子のどこにあっても、name と value を持つ辞書を cookie とみなす。
+
+    Riot Client の実ファイルは
+        rso-authenticator:
+            tdid:
+                name: "tdid"
+                value: "..."
+                expiryTime: 1820012619
+    のような名前付きマッピングだが、リスト形式で持つ版もある。
+    構造を決め打ちせずに拾う。
+    """
+    if isinstance(node, dict):
+        name, value = node.get("name"), node.get("value")
+        if isinstance(name, str) and isinstance(value, str) and value:
+            found.append({
+                "name": name,
+                "value": value,
+                "expiryTime": node.get("expiryTime"),
+            })
+        for child in node.values():
+            _walk_cookies(child, found)
+    elif isinstance(node, list):
+        for child in node:
+            _walk_cookies(child, found)
+
+
+def _parse_cookies(text: str) -> list[dict]:
+    """まず YAML として読む。読めなければ正規表現に落とす。"""
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+    except Exception:
+        data = None
+
+    if data is not None:
+        found: list[dict] = []
+        _walk_cookies(data, found)
+        if found:
+            return found
+
+    # YAML として壊れている場合の保険
+    return [
+        {"name": m.group("name"), "value": m.group("value"), "expiryTime": None}
+        for m in _COOKIE_RE.finditer(text)
+    ]
+
+
 def inspect_blobs(blobs: dict[str, bytes]) -> SessionInfo:
     """保存済みセッション (ファイル名 -> 中身) から puuid と有効期限を読む。"""
     cookies: dict[str, str] = {}
+    expiry_times: dict[str, float] = {}
     for data in blobs.values():
-        text = data.decode("utf-8", errors="replace")
-        for m in _COOKIE_RE.finditer(text):
-            name = m.group("name")
+        for cookie in _parse_cookies(data.decode("utf-8", errors="replace")):
+            name = cookie["name"]
             if name in INTERESTING_COOKIES and name not in cookies:
-                cookies[name] = m.group("value").strip("'\"")
+                cookies[name] = cookie["value"].strip("'\"")
+                if cookie.get("expiryTime"):
+                    try:
+                        expiry_times[name] = float(cookie["expiryTime"])
+                    except (TypeError, ValueError):
+                        pass
 
     info = SessionInfo(cookies=cookies)
 
-    # ssid が取れていればそれを、駄目なら全文から JWT を拾って sub を持つものを使う
+    # ssid が取れていればそれを使う。
+    # 取れなかった場合に全文から JWT を拾うのは、cookie を 1 つも構造的に
+    # 読めなかったときだけにする。cookie は読めたが ssid が無い状態は
+    # 「ログイン情報を保存していない」であって、そこで別の JWT を ssid に
+    # 昇格させると、ログアウト中の端末をログイン済みと誤判定する。
     candidates = [cookies["ssid"]] if cookies.get("ssid") else []
-    if not candidates:
+    if not candidates and not cookies:
         for data in blobs.values():
             candidates += _JWT_RE.findall(data.decode("utf-8", errors="replace"))
     for token in candidates:
         payload = decode_jwt_payload(token)
         if payload.get("sub"):
             info.puuid = payload["sub"]
-            info.expires_at = float(payload.get("exp", 0) or 0)
+            # cookie 自身が持つ expiryTime を優先する。JWT の exp は
+            # トークンの寿命であって、cookie の寿命とは限らない。
+            info.expires_at = (expiry_times.get("ssid")
+                               or float(payload.get("exp", 0) or 0))
             if not cookies.get("ssid"):
                 cookies["ssid"] = token
             break
     return info
 
 
-def update_cookies(blobs: dict[str, bytes],
-                   cookies: dict[str, str]) -> dict[str, bytes]:
+_NAME_LINE_RE = re.compile(r'^(?P<indent>\s*)(?:-\s*)?name:\s*["\']?(?P<name>[\w-]+)["\']?\s*$')
+_VALUE_LINE_RE = re.compile(r'^(?P<head>\s*(?:-\s*)?value:\s*)(?P<q>["\']?)[^"\'\s]*(?P=q)\s*$')
+_EXPIRY_LINE_RE = re.compile(r'^(?P<head>\s*(?:-\s*)?expiryTime:\s*)\S+\s*$')
+
+
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def update_cookies(blobs: dict[str, bytes], cookies: dict[str, str],
+                   expiries: dict[str, float] | None = None) -> dict[str, bytes]:
     """セッションファイル内の cookie 値を差し替えた blob を返す。
 
     再認証のたびに Riot は cookie をローテーションして返してくる。
     それを書き戻さないと、最初に取り込んだ cookie の期限が来た時点で切れる。
-    書き戻せば、使うたびに有効期限が延びていく。
-    """
-    def replace(match: "re.Match[str]") -> str:
-        name = match.group("name")
-        new = cookies.get(name)
-        if not new:
-            return match.group(0)
-        return f"name: {name}{match.group('between')}value: {new}"
 
-    return {
-        rel: _COOKIE_RE.sub(replace, data.decode("utf-8", errors="replace")).encode("utf-8")
-        for rel, data in blobs.items()
-    }
+    値だけを行単位で差し替え、YAML 全体は書き直さない。書き直すと引用符や
+    並び順が変わり、Riot Client 側が読めなくなる危険があるため。
+
+    expiryTime も一緒に更新する。実ファイルの cookie は JWT に exp を
+    持たないことがあり、その場合 expiryTime だけが寿命の情報源になる。
+    """
+    expiries = expiries or {}
+    out: dict[str, bytes] = {}
+
+    for rel, data in blobs.items():
+        lines = data.decode("utf-8", errors="replace").splitlines(keepends=True)
+
+        for i, line in enumerate(lines):
+            m = _NAME_LINE_RE.match(line.rstrip("\r\n"))
+            if not m:
+                continue
+            name = m.group("name")
+            if name not in cookies and name not in expiries:
+                continue
+
+            # この name 行と同じ字下げの範囲を、その cookie のブロックとみなす
+            indent = _indent_of(line)
+            start = i
+            while start > 0 and _indent_of(lines[start - 1]) >= indent \
+                    and lines[start - 1].strip():
+                start -= 1
+            end = i + 1
+            while end < len(lines) and _indent_of(lines[end]) >= indent \
+                    and lines[end].strip():
+                end += 1
+
+            _rewrite_block(lines, start, end,
+                           cookies.get(name), expiries.get(name))
+
+        out[rel] = "".join(lines).encode("utf-8")
+    return out
+
+
+def _rewrite_block(lines: list[str], start: int, end: int,
+                   value: str | None, expiry: float | None) -> None:
+    for j in range(start, end):
+        stripped = lines[j].rstrip("\r\n")
+        newline = lines[j][len(stripped):]
+
+        if value:
+            m = _VALUE_LINE_RE.match(stripped)
+            if m:
+                q = m.group("q")
+                lines[j] = f"{m.group('head')}{q}{value}{q}{newline}"
+                continue
+        if expiry:
+            m = _EXPIRY_LINE_RE.match(stripped)
+            if m:
+                lines[j] = f"{m.group('head')}{int(expiry)}{newline}"
 
 
 def capture() -> dict[str, bytes]:

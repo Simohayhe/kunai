@@ -5,9 +5,26 @@
 """
 from __future__ import annotations
 
+import os
 import time
 
 import psutil
+
+from .. import paths
+
+# モック環境で動いているときに終了させたことにするプロセス名。
+# FakeRiotEnv が差し込む。
+_MOCK_RUNNING: set[str] = set()
+
+
+def mock_mode() -> bool:
+    """paths がモック環境に差し替えられているか。
+
+    モックを指しているのに本物の Riot Client を kill してしまうと、
+    テストのつもりが実際のゲームやダウンロードを巻き込む。
+    そうならないよう、モック時は実プロセスに一切触れない。
+    """
+    return bool(os.environ.get(paths.ENV_OVERRIDE_LOCALAPPDATA))
 
 # 落とす順番が大事。UX (画面) を先に、サービス本体を最後に。
 CLIENT_PROCESSES = (
@@ -35,6 +52,8 @@ def _iter(names: tuple[str, ...]):
 
 def running(names: tuple[str, ...] | None = None) -> list[str]:
     names = names or (CLIENT_PROCESSES + GAME_PROCESSES)
+    if mock_mode():
+        return sorted(n for n in _MOCK_RUNNING if n in names)
     return sorted({p.info["name"] for p in _iter(names)})
 
 
@@ -52,6 +71,13 @@ def stop_all(timeout: float = 12.0, include_game: bool = True) -> list[str]:
     まず terminate で行儀よく頼み、粘るものだけ kill する。
     """
     order = (GAME_PROCESSES + CLIENT_PROCESSES) if include_game else CLIENT_PROCESSES
+
+    if mock_mode():
+        # モック環境では実プロセスに触らない。終了したことにするだけ。
+        stopped = [n for n in order if n in _MOCK_RUNNING]
+        _MOCK_RUNNING.difference_update(stopped)
+        return stopped
+
     stopped: list[str] = []
     deadline = time.time() + timeout
 

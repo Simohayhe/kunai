@@ -249,7 +249,8 @@ class AccountService:
         if not new_ssid or new_ssid == old.cookies.get("ssid"):
             return 0.0
 
-        updated = session.update_cookies(blobs, result.cookies)
+        updated = session.update_cookies(blobs, result.cookies,
+                                         result.cookie_expiries)
         new_info = session.inspect_blobs(updated)
         # 読み直して、確かに有効かつ期限が延びていることを確かめてから書く。
         # ここを確認しないと、壊れた応答で使えるセッションを潰しかねない。
