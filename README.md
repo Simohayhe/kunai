@@ -31,16 +31,21 @@
 ## 動作要件
 
 - Windows 10 / 11
-- Python 3.11 以上
 - VALORANT（Riot Client）がインストールされていること
+
+## 導入
+
+### exe を使う（Python 不要）
+
+[Releases](../../releases) から `ValorantAccountManager.exe` を落として実行するだけ。
+インストール不要。設定と保管庫は `%LOCALAPPDATA%\ValorantAccountManager` に作られる。
+
+### ソースから動かす
+
+Python 3.11 以上が必要。
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 使い方
-
-```bash
 python main.py
 ```
 
@@ -95,6 +100,7 @@ vam/
   storage.py             暗号化された保管庫
   models.py              Account / RankInfo / WalletInfo / InventoryInfo
   service.py             中核。UI からはここだけを呼ぶ
+  diagnostics.py         クラッシュログと環境情報
   riot/
     process.py           Riot 系プロセスの終了
     session.py           セッションファイルの保存・復元・解析
@@ -108,6 +114,7 @@ vam/
   mock/                  偽 Riot 環境とデモデータ
 tests/test_all.py        通しテスト (VALORANT 未インストールでも全部走る)
 tools/ui_shot.py         UI のスクリーンショット撮影
+tools/build_exe.py       配布用 exe のビルド
 ```
 
 ## テスト
@@ -143,6 +150,23 @@ VALORANT が入っていなくても全項目が走る。`vam/mock/fake_riot.py`
 
 > 書き戻しは、読み直して**有効かつ期限が延びていること**を確認してからでないと行わない。
 > 壊れた応答や期限の縮む応答で、使えているセッションを潰さないようにしてある。
+
+## うまくいかないとき
+
+ヘッダ右の **「?」ボタン** で診断情報が出る。Riot Client の検出結果、セッションファイルの
+有無、起動中プロセスなどが並ぶので、そのままコピーして報告に使える。
+
+予期しないエラーで落ちた場合は `%LOCALAPPDATA%\ValorantAccountManager\crash.log` に
+スタックトレースが残る。
+
+よくある詰まりどころ:
+
+| 症状 | 原因と対処 |
+|---|---|
+| 「Riot Client が見つかりません」 | VALORANT 未インストール、または非標準の場所。診断情報で検出パスを確認 |
+| 「ログイン中のアカウントが見つかりません」 | Riot Client のログイン時に「ログイン情報を保存する」が無効。有効にして入り直す |
+| 取り込めるが「更新」が失敗する | cookie 再認証が通っていない。診断情報とエラー文言を添えて報告 |
+| 切り替え後にログイン画面が出る | セッションが失効している。そのアカウントで入り直して取り込み直す |
 
 ## 注意
 
