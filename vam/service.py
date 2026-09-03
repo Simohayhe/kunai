@@ -123,7 +123,7 @@ class AccountService:
     # -- 切り替え -----------------------------------------------------------
     def switch(self, account: Account, launch_game: bool = True,
                force: bool = False, allow_autologin: bool = True,
-               submit_login: bool = False,
+               submit_login: bool = True,
                progress: Progress = _noop) -> SwitchResult:
         """指定アカウントに切り替える。
 
@@ -182,17 +182,27 @@ class AccountService:
             try:
                 window = autologin.wait_for_login_window(timeout=90)
                 progress("ログイン情報を入力中…")
-                autologin.perform_login(
+                outcome = autologin.perform_login(
                     account.username, account.password,
                     window=window, submit=submit_login,
                 )
-                warnings.append(
-                    "ユーザー名とパスワードを入力しました。"
-                    "Riot のログイン画面は hCaptcha で保護されているため、"
-                    "サインインはご自身で押してください。"
-                    "そのとき「サインイン状態を維持」を必ず有効にしてください"
-                    "（これが無いとセッションを保存できません）。"
-                )
+                if outcome["stay_signed_in"] is False:
+                    warnings.append(
+                        "「サインイン状態を維持」の状態を判別できませんでした。"
+                        "ログイン画面で有効になっているか確認してください。"
+                        "これが無効だとセッションを保存できず、次回から切り替えできません。"
+                    )
+                if outcome["submitted"]:
+                    progress("サインインしました")
+                    warnings.append(
+                        "サインインを実行しました。hCaptcha や 2 段階認証が出た場合は、"
+                        "画面に従って対応してください。"
+                    )
+                else:
+                    warnings.append(
+                        "ユーザー名とパスワードを入力しました。"
+                        "サインインはご自身で押してください。"
+                    )
             except autologin.AutoLoginError as exc:
                 warnings.append(f"自動入力に失敗しました: {exc}")
 

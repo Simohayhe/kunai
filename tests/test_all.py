@@ -379,13 +379,30 @@ def test_autologin_geometry() -> None:
     x3, y3 = autologin.map_fraction(100, 200, 1000, 1000, (0.5, 0.25))
     check("原点のずれを足す", (x3, y3) == (600, 450), f"({x3},{y3})")
 
-    check("既定では送信しない",
-          autologin.perform_login.__defaults__[1] is False)
+    import inspect
+    defaults = {name: p.default for name, p
+                in inspect.signature(autologin.perform_login).parameters.items()}
+    check("既定でサインインまで行う", defaults["submit"] is True)
+    check("既定で「サインイン状態を維持」を有効にする",
+          defaults["stay_signed_in"] is True)
+
     try:
         autologin.perform_login("", "x")
         check("空の入力を拒否", False)
     except autologin.AutoLoginError:
         check("空の入力を拒否", True)
+
+    # チェックボックスの色判定。実機で採った値を使う
+    check("未チェック(無彩色)を False",
+          autologin.is_checkbox_checked((232, 232, 232)) is False)
+    check("チェック済み(赤み)を True",
+          autologin.is_checkbox_checked((72, 29, 30)) is True)
+    check("非アクティブで暗転した無彩色も False",
+          autologin.is_checkbox_checked((82, 82, 82)) is False)
+    check("明るい赤も True",
+          autologin.is_checkbox_checked((196, 48, 62)) is True)
+    check("判別できない色は None",
+          autologin.is_checkbox_checked((100, 90, 70)) is None)
 
 
 def test_session_renewal() -> None:

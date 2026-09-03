@@ -4,6 +4,17 @@ Riot Client のログイン画面にキー入力を送り込む。
 Riot が画面構成を変えると壊れる方式なので、あくまで保険。
 通常は session.py のセッション復元を使うこと。
 
+流れは ユーザー名 → Tab → パスワード → 「サインイン状態を維持」 → Enter。
+すべてキーボードで行う。座標クリックには頼らない。
+
+実機で確かめた要点:
+  - ウィンドウを正しくアクティブ化できていれば、起動直後のログイン画面は
+    ユーザー名欄にフォーカスが載っているので、クリックは要らない
+  - ただし SetForegroundWindow を呼ぶだけでは「最前面に出るがアクティブでない」
+    状態になることがあり、その場合キー入力が 1 文字も届かない (focus を参照)
+  - 「サインイン状態を維持」へは Tab 7 回。位置を決め打ちせず、
+    フォーカスリングを見て到達を判定する
+
 キーは KEYEVENTF_UNICODE で送るので、日本語キーボードでも記号が化けない。
 """
 from __future__ import annotations
@@ -17,7 +28,7 @@ import psutil
 
 user32 = ctypes.windll.user32
 
-# ログイン画面のウィンドウ。実機 (Riot Client 134.x) で実測した値。
+# ログイン画面のウィンドウ。実機 (Riot Client v138.0.1) で実測した値。
 # UI は Electron なのでウィンドウクラスは Chrome_WidgetWin_1 になる。
 # これは Chromium 系アプリなら何でも名乗る汎用クラスなので、
 # クラスだけで判定してはいけない。所有プロセスが Riot のものかどうかが本命。
@@ -36,6 +47,7 @@ VK_RETURN = 0x0D
 VK_BACK = 0x08
 VK_CONTROL = 0x11
 VK_A = 0x41
+VK_SPACE = 0x20
 
 
 class AutoLoginError(Exception):
@@ -175,16 +187,16 @@ def enumerate_candidates() -> list[Window]:
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         width = rect.right - rect.left
         height = rect.bottom - rect.top
-        if width < MIN_WINDOW_WIDTH:
-            return True
 
         owned = pid.value in pids
         matches_class = cls.value in LOGIN_WINDOW_CLASSES
         matches_title = any(t in title for t in LOGIN_WINDOW_TITLES)
         if owned and (matches_class or matches_title):
+            # 最小化されていると 160x28 のような小ささで報告される。
+            # Riot 所有と分かっているものは大きさで弾かない。復元してから測る。
             found.append(Window(hwnd, title, pid.value, cls.value,
                                 width, height, owned_by_riot=True))
-        elif not pids and matches_title:
+        elif not pids and matches_title and width >= MIN_WINDOW_WIDTH:
             # プロセスを列挙できなかったときの保険。タイトル一致だけで拾う
             found.append(Window(hwnd, title, pid.value, cls.value,
                                 width, height, owned_by_riot=False))
@@ -202,20 +214,77 @@ def find_login_window() -> Window | None:
     return candidates[0] if candidates else None
 
 
-def wait_for_login_window(timeout: float = 60.0) -> Window:
+# 読み込み中のスプラッシュは 600x600 程度。これを超えたらログイン画面とみなす
+LOADED_MIN_WIDTH = 800
+
+
+def wait_for_login_window(timeout: float = 120.0,
+                          min_width: int = LOADED_MIN_WIDTH,
+                          stable_for: float = 1.5) -> Window:
+    """ログイン画面が「出来上がる」まで待つ。
+
+    起動直後はスプラッシュ (600x600 程度) が出て、読み込みが終わると
+    ウィンドウが作り直される。古いハンドルを掴んだままだと無効になるので、
+    毎回取り直し、十分な大きさで一定時間安定してから返す。
+    """
     deadline = time.time() + timeout
+    stable_since: float | None = None
+    last_size: tuple[int, int] | None = None
+
     while time.time() < deadline:
         w = find_login_window()
-        if w:
-            return w
+        if w and w.width >= min_width:
+            size = (w.width, w.height)
+            if size == last_size:
+                if stable_since and time.time() - stable_since >= stable_for:
+                    return w
+            else:
+                last_size = size
+                stable_since = time.time()
+        else:
+            stable_since, last_size = None, None
         time.sleep(0.5)
+
+    # 大きさの条件を満たさなくても、見つかっているなら返す
+    w = find_login_window()
+    if w:
+        return w
     raise AutoLoginError("Riot Client のログイン画面が見つかりませんでした")
 
 
-def focus(window: Window) -> None:
-    user32.ShowWindow(window.hwnd, 9)          # SW_RESTORE
-    user32.SetForegroundWindow(window.hwnd)
-    time.sleep(0.4)
+_kernel32 = ctypes.windll.kernel32
+SW_RESTORE = 9
+VK_MENU = 0x12
+
+
+def focus(window: Window, settle: float = 0.6) -> None:
+    """ウィンドウを本当にアクティブにする。
+
+    SetForegroundWindow を単に呼ぶだけだと、最前面に出はするが
+    アクティブにはならないことがある。その状態だとキー入力が届かず、
+    Riot Client は画面を暗転させたままになる。
+
+    Windows がフォーカス奪取を許すよう、ALT を軽く叩いてから、
+    相手スレッドに入力状態を接続して活性化する。
+    """
+    user32.ShowWindow(window.hwnd, SW_RESTORE)
+
+    # ALT の空打ち。SetForegroundWindow の制限を外すための作法
+    press(VK_MENU)
+
+    target_thread = user32.GetWindowThreadProcessId(window.hwnd, None)
+    current_thread = _kernel32.GetCurrentThreadId()
+    attached = user32.AttachThreadInput(current_thread, target_thread, True)
+    try:
+        user32.BringWindowToTop(window.hwnd)
+        user32.SetForegroundWindow(window.hwnd)
+        user32.SetActiveWindow(window.hwnd)
+        user32.SetFocus(window.hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(current_thread, target_thread, False)
+
+    time.sleep(settle)
     if user32.GetForegroundWindow() != window.hwnd:
         raise AutoLoginError(
             "Riot Client を前面にできませんでした。"
@@ -223,11 +292,19 @@ def focus(window: Window) -> None:
         )
 
 
+def is_active(window: Window) -> bool:
+    return user32.GetForegroundWindow() == window.hwnd
+
+
 # ログイン画面のユーザー名欄の位置。ウィンドウ左上からの比率。
 # 実機 (Riot Client v138.0.1、ウィンドウ 1536x864) を実測した値。
 # ログインウィンドウはユーザーがリサイズできない固定サイズなので、
 # この比率で足りる。Riot が画面構成を変えたらここを測り直すこと。
 USERNAME_FIELD = (0.130, 0.310)
+# 「サインイン状態を維持」のチェックボックス。
+# これを有効にしないと riot-login.persist が null のままで、
+# セッションが保存されず切り替えに使えない。ログインより大事。
+STAY_SIGNED_IN = (0.0417, 0.5023)
 
 
 def map_fraction(left: int, top: int, width: int, height: int,
@@ -250,17 +327,95 @@ def field_position(window: Window, fraction: tuple[float, float]) -> tuple[int, 
     return map_fraction(*window_rect(window), fraction)
 
 
+_gdi32 = ctypes.windll.gdi32
+
+
+def get_pixel(x: int, y: int) -> tuple[int, int, int]:
+    """画面上の 1 点の色を RGB で返す。"""
+    dc = user32.GetDC(0)
+    try:
+        value = _gdi32.GetPixel(dc, int(x), int(y))
+    finally:
+        user32.ReleaseDC(0, dc)
+    return (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF)
+
+
+def is_checkbox_checked(rgb: tuple[int, int, int]) -> bool | None:
+    """チェックボックスの色から状態を判定する。
+
+    未チェックは無彩色の枠、チェック済みは Riot の赤。
+    ウィンドウが非アクティブだと全体が暗転して色が沈むので、
+    明るさではなく「赤みがあるか」で見る。
+    判別できないときは None を返し、呼び側では触らない。
+    """
+    r, g, b = rgb
+    if abs(r - g) <= 12 and abs(g - b) <= 12:
+        return False                      # 無彩色 = 未チェック
+    if r - max(g, b) >= 15:
+        return True                       # 赤み = チェック済み
+    return None
+
+
+def stay_signed_in_state(window: Window) -> bool | None:
+    x, y = field_position(window, STAY_SIGNED_IN)
+    return is_checkbox_checked(get_pixel(x, y))
+
+
+def _has_focus_ring(window: Window) -> bool:
+    """チェックボックスにフォーカスリングが出ているか。
+
+    Tab で回ってきたかを判定するのに使う。周囲 4 点のうち、
+    他より明らかに暗い点があればリングが描かれている。
+    明るさの絶対値ではなく相対差で見るので、画面の暗転に影響されない。
+    """
+    x, y = field_position(window, STAY_SIGNED_IN)
+    points = [(x - 12, y), (x + 12, y), (x, y - 12), (x, y + 12)]
+    lums = sorted(sum(get_pixel(px, py)) for px, py in points)
+    return lums[0] < lums[len(lums) // 2] - 200
+
+
+def ensure_stay_signed_in(window: Window, max_tabs: int = 12) -> bool:
+    """「サインイン状態を維持」を有効にする。キーボードだけで行う。
+
+    Tab を送りながらフォーカスリングを見て、チェックボックスに
+    到達したら Space で入れる。座標クリックに頼らないので、
+    画面配置が多少変わっても追随する。
+
+    既に有効なら何もしない。判定できないときも触らない。
+    誤って外すと、ログインできてもセッションが保存されず、
+    切り替えに使えなくなるため。
+
+    実測 (Riot Client v138.0.1): ユーザー名欄から Tab 7 回で到達する。
+    """
+    if stay_signed_in_state(window) is True:
+        return True
+
+    for _ in range(max_tabs):
+        press(VK_TAB)
+        time.sleep(0.35)
+        if not _has_focus_ring(window):
+            continue
+        if stay_signed_in_state(window) is not True:
+            press(VK_SPACE)
+            time.sleep(0.4)
+        return stay_signed_in_state(window) is True
+    return False
+
+
 def perform_login(username: str, password: str, window: Window | None = None,
-                  submit: bool = False, settle: float = 1.2) -> None:
-    """ログイン画面にユーザー名とパスワードを打ち込む。
+                  submit: bool = True, settle: float = 1.2,
+                  stay_signed_in: bool = True) -> dict:
+    """ログイン画面にユーザー名とパスワードを打ち込み、サインインする。
 
-    既定では送信しない (submit=False)。Riot のログイン画面は hCaptcha で
-    保護されており、勝手に送信すると人手での確認を挟む余地がなくなる。
-    また「サインイン状態を維持」を有効にしてもらう必要があるので、
-    最後の一押しは利用者に任せる。
+    ユーザー名 → Tab → パスワード → (「サインイン状態を維持」) → Enter。
+    すべてキーボードで行い、座標クリックには頼らない。
 
-    ログイン画面は Electron なので、ウィンドウを前面にしただけでは
-    入力欄がフォーカスを持たない。必ずクリックしてから打ち込む。
+    「サインイン状態を維持」も有効にする。これが無いとログインできても
+    セッションが保存されず、このアプリの切り替えに使えない。
+
+    Riot のログイン画面は hCaptcha で保護されている。captcha が出た場合は
+    アプリ側では何もできないので、利用者が対応する必要がある。
+    結果を dict で返すので、呼び側で状況を伝えること。
     """
     if not username or not password:
         raise AutoLoginError("ユーザー名とパスワードの両方が必要です")
@@ -269,9 +424,8 @@ def perform_login(username: str, password: str, window: Window | None = None,
     focus(w)
     time.sleep(settle)
 
-    x, y = field_position(w, USERNAME_FIELD)
-    click_at(x, y)
-
+    # 起動直後のログイン画面はユーザー名欄にフォーカスが載っている。
+    # ウィンドウを正しくアクティブ化できていれば、クリックは要らない。
     # 既存の入力を消してから打つ
     press(VK_A, modifiers=(VK_CONTROL,))
     press(VK_BACK)
@@ -283,6 +437,14 @@ def perform_login(username: str, password: str, window: Window | None = None,
     press(VK_BACK)
     type_text(password)
 
+    kept = None
+    if stay_signed_in:
+        kept = ensure_stay_signed_in(w)
+
+    submitted = False
     if submit:
-        time.sleep(0.2)
+        time.sleep(0.3)
         press(VK_RETURN)
+        submitted = True
+
+    return {"submitted": submitted, "stay_signed_in": kept, "window": w}
