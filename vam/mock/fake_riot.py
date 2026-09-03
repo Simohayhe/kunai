@@ -1,0 +1,260 @@
+"""偽の Riot 環境。
+
+VALORANT が入っていない PC でも切替ロジックと API 層を通しで試せるようにする。
+本物と同じディレクトリ構造・同じ YAML 形状・同じローカル API を用意し、
+paths.py の環境変数フックで差し替える。
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import secrets
+import ssl
+import tempfile
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+from .. import paths
+
+PRIVATE_SETTINGS_TEMPLATE = """\
+riot-login:
+  persist:
+    session:
+      cookies:
+      - domain: auth.riotgames.com
+        hostOnly: true
+        httpOnly: true
+        name: tdid
+        path: /
+        persistent: true
+        secureOnly: true
+        value: {tdid}
+      - domain: auth.riotgames.com
+        hostOnly: true
+        httpOnly: true
+        name: ssid
+        path: /
+        persistent: true
+        secureOnly: true
+        value: {ssid}
+      - domain: auth.riotgames.com
+        hostOnly: true
+        httpOnly: true
+        name: clid
+        path: /
+        persistent: true
+        secureOnly: true
+        value: {clid}
+      - domain: auth.riotgames.com
+        hostOnly: true
+        httpOnly: true
+        name: csid
+        path: /
+        persistent: true
+        secureOnly: true
+        value: {csid}
+"""
+
+CLIENT_SETTINGS = """\
+install:
+  globals:
+    region: AP
+    locale: ja_JP
+"""
+
+
+def _b64(obj: dict) -> str:
+    raw = json.dumps(obj, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def make_jwt(puuid: str, ttl_days: int = 30, **extra) -> str:
+    """署名は飾り。中身の sub/exp だけが本物と同じ形になっていればよい。"""
+    header = _b64({"alg": "RS256", "kid": "mock", "typ": "JWT"})
+    payload = _b64({
+        "sub": puuid,
+        "iss": "https://auth.riotgames.com",
+        "exp": int(time.time()) + ttl_days * 86400,
+        "iat": int(time.time()),
+        **extra,
+    })
+    sig = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode().rstrip("=")
+    return f"{header}.{payload}.{sig}"
+
+
+class FakeRiotEnv:
+    """偽 Riot 環境ひとそろい。with 文で使う。"""
+
+    def __init__(self, root: Path | None = None):
+        self.root = Path(root) if root else Path(tempfile.mkdtemp(prefix="vam-mock-"))
+        self.local_appdata = self.root / "LocalAppData"
+        self.client_dir = self.local_appdata / "Riot Games" / "Riot Client"
+        self.exe = self.root / "RiotClientServices.exe.cmd"
+        self.launch_log = self.root / "launch.log"
+        self._saved_env: dict[str, str | None] = {}
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    # -- 環境の組み立て -----------------------------------------------------
+    def build(self, puuid: str | None = None, ttl_days: int = 30) -> str:
+        puuid = puuid or str(uuid.uuid4())
+        (self.client_dir / "Data").mkdir(parents=True, exist_ok=True)
+        (self.client_dir / "Config").mkdir(parents=True, exist_ok=True)
+        self.write_session(puuid, ttl_days)
+        (self.client_dir / "Config" / "RiotClientSettings.yaml").write_text(
+            CLIENT_SETTINGS, encoding="utf-8"
+        )
+        # 起動されたら引数をログに書くだけの偽 exe
+        self.exe.write_text(
+            "@echo off\r\n"
+            f'echo %DATE% %TIME% %* >> "{self.launch_log}"\r\n',
+            encoding="utf-8",
+        )
+        return puuid
+
+    def write_session(self, puuid: str, ttl_days: int = 30) -> str:
+        content = PRIVATE_SETTINGS_TEMPLATE.format(
+            ssid=make_jwt(puuid, ttl_days),
+            clid=make_jwt(puuid, ttl_days, cid="clid"),
+            csid=make_jwt(puuid, ttl_days, cid="csid"),
+            tdid=make_jwt(puuid, 365, cid="tdid"),
+        )
+        (self.client_dir / "Data" / "RiotGamesPrivateSettings.yaml").write_text(
+            content, encoding="utf-8"
+        )
+        (self.client_dir / "Data" / "RiotClientPrivateSettings.yaml").write_text(
+            "private:\n  settings: {}\n", encoding="utf-8"
+        )
+        return puuid
+
+    def logged_out(self) -> None:
+        for name in ("RiotGamesPrivateSettings.yaml", "RiotClientPrivateSettings.yaml"):
+            f = self.client_dir / "Data" / name
+            if f.is_file():
+                f.unlink()
+
+    # -- ローカル API (lockfile + HTTPS) -----------------------------------
+    def start_local_api(self, puuid: str, game_name: str = "MockPlayer",
+                        tag_line: str = "JP1") -> int:
+        password = secrets.token_hex(16)
+        handler = _make_handler(password, puuid, game_name, tag_line)
+        ctx = _self_signed_context(self.root)
+        self._server = HTTPServer(("127.0.0.1", 0), handler)
+        self._server.socket = ctx.wrap_socket(self._server.socket, server_side=True)
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        (self.client_dir / "Config").mkdir(parents=True, exist_ok=True)
+        (self.client_dir / "Config" / "lockfile").write_text(
+            f"Riot Client:{os.getpid()}:{port}:{password}:https", encoding="utf-8"
+        )
+        return port
+
+    def stop_local_api(self) -> None:
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        lock = self.client_dir / "Config" / "lockfile"
+        if lock.is_file():
+            lock.unlink()
+
+    # -- paths.py の差し替え ------------------------------------------------
+    def activate(self) -> "FakeRiotEnv":
+        for key, value in (
+            (paths.ENV_OVERRIDE_LOCALAPPDATA, str(self.local_appdata)),
+            (paths.ENV_OVERRIDE_CLIENT_EXE, str(self.exe)),
+        ):
+            self._saved_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def deactivate(self) -> None:
+        for key, old in self._saved_env.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+        self._saved_env.clear()
+        self.stop_local_api()
+
+    def __enter__(self) -> "FakeRiotEnv":
+        return self.activate()
+
+    def __exit__(self, *exc) -> None:
+        self.deactivate()
+
+
+def _self_signed_context(workdir: Path) -> ssl.SSLContext:
+    """本物の Riot ローカル API も自己署名証明書なので、それに合わせる。"""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    import datetime
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_file = workdir / "mock-cert.pem"
+    cert_file.write_bytes(
+        cert.public_bytes(serialization.Encoding.PEM)
+        + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_file)
+    return ctx
+
+
+def _make_handler(password: str, puuid: str, game_name: str, tag_line: str):
+    expected = "Basic " + base64.b64encode(f"riot:{password}".encode()).decode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # 標準エラーを汚さない
+            pass
+
+        def _send(self, code: int, body: dict) -> None:
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.headers.get("Authorization") != expected:
+                return self._send(401, {"errorCode": "UNAUTHORIZED"})
+            if self.path.startswith("/entitlements/v1/token"):
+                return self._send(200, {
+                    "accessToken": make_jwt(puuid, 1, aud="valorant"),
+                    "token": make_jwt(puuid, 1, aud="entitlements"),
+                    "subject": puuid,
+                })
+            if self.path.startswith("/chat/v1/session"):
+                return self._send(200, {
+                    "puuid": puuid, "game_name": game_name, "game_tag": tag_line,
+                    "loaded": True, "region": "ap", "state": "connected",
+                })
+            if self.path.startswith("/riotclient/region-locale"):
+                return self._send(200, {"region": "AP", "webLanguage": "ja-JP"})
+            return self._send(404, {"errorCode": "NOT_FOUND", "path": self.path})
+
+    return Handler
