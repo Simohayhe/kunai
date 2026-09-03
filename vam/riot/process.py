@@ -27,9 +27,14 @@ def mock_mode() -> bool:
     return bool(os.environ.get(paths.ENV_OVERRIDE_LOCALAPPDATA))
 
 # 落とす順番が大事。UX (画面) を先に、サービス本体を最後に。
+# 実機 (Riot Client 134.x) を測ったところ、UI は Electron 化していて
+# プロセス名は "Riot Client.exe"。これを落とし損ねると画面が居座り、
+# セッションファイルを掴んだまま終了時に書き戻してしまう。
+# 旧版の名前も残してあるので、どちらの版でも効く。
 CLIENT_PROCESSES = (
-    "RiotClientUxRender.exe",
-    "RiotClientUx.exe",
+    "Riot Client.exe",           # Electron 版の UI (実機で確認)
+    "RiotClientUxRender.exe",    # 旧版
+    "RiotClientUx.exe",          # 旧版
     "RiotClientCrashHandler.exe",
     "RiotClientServices.exe",
 )

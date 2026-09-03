@@ -347,6 +347,47 @@ def test_process_isolation() -> None:
     check("模擬プロセスは片付く", not process._MOCK_RUNNING)
 
 
+def test_autologin_geometry() -> None:
+    """自動ログインの定数と座標計算。実機で実測した値を固定する。
+
+    実機 (Riot Client v138.0.1) で測ったところ、旧定数は全部外れていた:
+      - ウィンドウクラスは RCLIENT ではなく Chrome_WidgetWin_1 (Electron)
+      - UI のプロセス名は RiotClientUx.exe ではなく "Riot Client.exe"
+    """
+    section("自動ログインの座標と定数")
+    from vam.riot import autologin, process
+
+    check("Electron のクラスを候補に含む",
+          "Chrome_WidgetWin_1" in autologin.LOGIN_WINDOW_CLASSES)
+    check("旧版のクラスも残してある", "RCLIENT" in autologin.LOGIN_WINDOW_CLASSES)
+    check("UI のプロセス名が実機と一致",
+          "Riot Client.exe" in autologin.UX_PROCESSES)
+    check("終了対象に UI プロセスが入っている",
+          "Riot Client.exe" in process.CLIENT_PROCESSES)
+    check("UI をサービスより先に落とす",
+          process.CLIENT_PROCESSES.index("Riot Client.exe")
+          < process.CLIENT_PROCESSES.index("RiotClientServices.exe"))
+
+    # 実機の実測値: ウィンドウ (78,23) 1536x864、ユーザー名欄の中心 (277,290)
+    x, y = autologin.map_fraction(78, 23, 1536, 864, autologin.USERNAME_FIELD)
+    check("実測したユーザー名欄の座標を再現する",
+          abs(x - 277) <= 2 and abs(y - 290) <= 2, f"({x},{y})")
+
+    # 原点や大きさが変わっても比率どおりに追随する
+    x2, y2 = autologin.map_fraction(0, 0, 1000, 1000, (0.5, 0.25))
+    check("比率計算が正しい", (x2, y2) == (500, 250), f"({x2},{y2})")
+    x3, y3 = autologin.map_fraction(100, 200, 1000, 1000, (0.5, 0.25))
+    check("原点のずれを足す", (x3, y3) == (600, 450), f"({x3},{y3})")
+
+    check("既定では送信しない",
+          autologin.perform_login.__defaults__[1] is False)
+    try:
+        autologin.perform_login("", "x")
+        check("空の入力を拒否", False)
+    except autologin.AutoLoginError:
+        check("空の入力を拒否", True)
+
+
 def test_session_renewal() -> None:
     section("セッションの延長（cookie ローテーション）")
     import types
@@ -724,6 +765,7 @@ def main() -> int:
     print("VALORANT Account Manager — 通しテスト")
     for fn in (test_crypto, test_storage, test_session, test_localapi,
                test_service, test_real_file_format, test_process_isolation,
+               test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_ui):
         try:
