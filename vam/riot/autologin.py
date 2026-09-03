@@ -357,8 +357,17 @@ def is_checkbox_checked(rgb: tuple[int, int, int]) -> bool | None:
 
 
 def stay_signed_in_state(window: Window) -> bool | None:
-    x, y = field_position(window, STAY_SIGNED_IN)
-    return is_checkbox_checked(get_pixel(x, y))
+    """チェックボックスの状態。読めないときは None。
+
+    最小化されていたり読み込み途中だと、画面の関係ない場所を読んでしまう。
+    そのまま False を返すと、誤って触りにいく判断につながる。
+    """
+    left, top, width, height = window_rect(window)
+    if width < LOADED_MIN_WIDTH:
+        return None
+    return is_checkbox_checked(
+        get_pixel(*map_fraction(left, top, width, height, STAY_SIGNED_IN))
+    )
 
 
 def _has_focus_ring(window: Window) -> bool:
@@ -437,9 +446,8 @@ def perform_login(username: str, password: str, window: Window | None = None,
     press(VK_BACK)
     type_text(password)
 
-    kept = None
-    if stay_signed_in:
-        kept = ensure_stay_signed_in(w)
+    # stay_signed_in=False なら触らない。結果は None (未操作) になる
+    kept = ensure_stay_signed_in(w) if stay_signed_in else None
 
     submitted = False
     if submit:

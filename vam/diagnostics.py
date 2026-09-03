@@ -69,7 +69,7 @@ def frozen() -> bool:
 
 
 def version() -> str:
-    return "0.1.0"
+    return "0.1.3"
 
 
 def install_excepthook(on_crash=None) -> None:

@@ -36,10 +36,31 @@ class SwitchResult:
     warnings: list[str]
 
 
+# 設定キー。settings.json に平文で置く (機密ではない)
+SETTING_STAY_SIGNED_IN = "stay_signed_in"
+
+
 class AccountService:
     def __init__(self, vault: Vault):
         self.vault = vault
         self.content = content.ContentCache(vault.app_dir / "cache")
+
+    @property
+    def stay_signed_in(self) -> bool:
+        """自動ログイン時に「サインイン状態を維持」を有効にするか。
+
+        既定は有効。無効にすると Riot がセッション cookie を保存しないので、
+        セッションの取り込み・パスワード無しの切り替え・ランクや所持品の
+        取得 (どれも ssid cookie が要る) がすべて使えなくなる。
+        毎回パスワードを打ち込む運用にしたい場合だけ落とすこと。
+        """
+        return bool(self.vault.settings().get(SETTING_STAY_SIGNED_IN, True))
+
+    @stay_signed_in.setter
+    def stay_signed_in(self, value: bool) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_STAY_SIGNED_IN] = bool(value)
+        self.vault.save_settings(settings)
 
     # -- 環境 ---------------------------------------------------------------
     def environment(self) -> paths.Environment:
@@ -185,8 +206,14 @@ class AccountService:
                 outcome = autologin.perform_login(
                     account.username, account.password,
                     window=window, submit=submit_login,
+                    stay_signed_in=self.stay_signed_in,
                 )
-                if outcome["stay_signed_in"] is False:
+                if outcome["stay_signed_in"] is None:
+                    warnings.append(
+                        "「サインイン状態を維持」は設定で無効にしています。"
+                        "セッションが保存されないため、次回もパスワード入力になります。"
+                    )
+                elif outcome["stay_signed_in"] is False:
                     warnings.append(
                         "「サインイン状態を維持」の状態を判別できませんでした。"
                         "ログイン画面で有効になっているか確認してください。"

@@ -404,6 +404,22 @@ def test_autologin_geometry() -> None:
     check("判別できない色は None",
           autologin.is_checkbox_checked((100, 90, 70)) is None)
 
+    # 「サインイン状態を維持」の設定。既定は有効
+    import tempfile as _tf
+    from vam.service import AccountService, SETTING_STAY_SIGNED_IN
+    from vam.storage import Vault as _Vault
+    v = _Vault(Path(_tf.mkdtemp()))
+    v.initialize()
+    svc = AccountService(v)
+    check("既定は有効", svc.stay_signed_in is True)
+    svc.stay_signed_in = False
+    check("無効にできる", svc.stay_signed_in is False)
+    check("設定ファイルに残る",
+          v.settings().get(SETTING_STAY_SIGNED_IN) is False)
+    check("読み直しても保たれる", AccountService(v).stay_signed_in is False)
+    svc.stay_signed_in = True
+    check("戻せる", svc.stay_signed_in is True)
+
 
 def test_session_renewal() -> None:
     section("セッションの延長（cookie ローテーション）")
