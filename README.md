@@ -168,6 +168,41 @@ VALORANT が入っていなくても全項目が走る。`vam/mock/fake_riot.py`
 | 取り込めるが「更新」が失敗する | cookie 再認証が通っていない。診断情報とエラー文言を添えて報告 |
 | 切り替え後にログイン画面が出る | セッションが失効している。そのアカウントで入り直して取り込み直す |
 
+## セッションファイルの形
+
+切り替えの土台になるファイルなので、実機 (Riot Client 134.x) で確認した形を残しておく。
+`%LOCALAPPDATA%\Riot Games\Riot Client\Data\RiotGamesPrivateSettings.yaml`
+
+```yaml
+psl:
+    authorization:
+        riot-client: null
+riot-login:
+    persist: null            # ログイン情報を保存していないと null
+rso-authenticator:
+    ssid:                    # 名前付きマッピング。リストではない
+        domain: "riotgames.com"
+        expiryTime: 1820012619   # cookie の寿命はここ
+        hostOnly: false
+        httpOnly: true
+        name: "ssid"         # 名前も値も引用符付き
+        path: "/"
+        persistent: true
+        secureOnly: true
+        value: "eyJhbGciOi..."
+    tdid:
+        ...
+```
+
+引っかかりやすい点:
+
+- **cookie 名も値も引用符で囲まれる。** 素朴に `name:\s*(\w+)` で拾うと 1 件も取れない
+- **寿命は JWT の `exp` ではなく `expiryTime`。** `tdid` の JWT はクレームが
+  `iat` / `id` / `nonce` だけで、`exp` も `sub` も持たない
+- **`ssid` が無ければ未ログイン。** そこにある別の JWT を代用してはいけない
+- 読み取りは PyYAML、書き戻しは行単位の差し替え。YAML を書き直すと引用符や
+  並び順が変わり、Riot Client 側が読めなくなる危険がある
+
 ## 注意
 
 - **アカウント切り替えは Riot Client を終了させる。** ゲーム中に実行すると確認を求められる
