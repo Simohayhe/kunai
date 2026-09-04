@@ -308,10 +308,30 @@ class AccountService:
             launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
             launched = True
 
+        if method == "session" and launched and recapture:
+            # 復元したトークンが Riot 側で失効していることがある。
+            # ファイル上は正しく見えるので、実際に通るか試すまで分からない。
+            # 通らなければクライアントはセッションを消してログイン画面に戻る。
+            if self.wait_and_capture(account, progress=progress):
+                recapture = False               # 取り込み済み
+            elif allow_autologin and account.username and account.password:
+                progress("保存セッションが通りませんでした。自動ログインに切り替えます…")
+                warnings.append(
+                    "保存されていたセッションは Riot 側で失効していました。"
+                    "登録済みのログイン情報で入り直します。"
+                )
+                method = "autologin"
+            else:
+                warnings.append(
+                    "保存されていたセッションは Riot 側で失効していました。"
+                    "このアカウントでログインし直して取り込み直すか、"
+                    "ユーザー名とパスワードを登録してください。"
+                )
+
         if method == "autologin":
             progress("ログイン画面を待っています…")
             try:
-                window = autologin.wait_for_login_window(timeout=90)
+                window = autologin.wait_for_login_window(timeout=120)
                 progress("ログイン情報を入力中…")
                 outcome = autologin.perform_login(
                     account.username, account.password,
@@ -347,8 +367,8 @@ class AccountService:
         self.vault.update(account)
         progress(f"{account.display_name} に切り替えました")
 
-        # 起動したなら、ログインし終えた後の状態を保存し直す。
-        # クライアントは起動時に refresh_token を更新するので、
+        # 自動ログインを行った場合は、その後のセッションを取り込む。
+        # クライアントは起動やログインのたび refresh_token を更新するので、
         # ここで取り込まないと保管庫のコピーが一世代古いままになり、
         # 次回の切り替えで Riot に拒否される。
         if launched and recapture:
