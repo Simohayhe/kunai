@@ -25,6 +25,10 @@ REGION_TO_SHARD = {
     "euw1": "eu", "eun1": "eu", "tr1": "eu", "ru": "eu", "me1": "eu",
     "jp1": "ap", "oc1": "ap", "ph2": "ap", "sg2": "ap",
     "th2": "ap", "tw2": "ap", "vn2": "ap", "sea": "ap",
+    # 数字なしで返ってくることもある。実機で "jp1" と "jp" の両方を観測した
+    "jp": "ap", "oc": "ap", "ph": "ap", "sg": "ap", "th": "ap",
+    "tw": "ap", "vn": "ap", "euw": "eu", "eun": "eu", "tr": "eu",
+    "la": "na",
 }
 REGIONS = ("ap", "na", "eu", "kr", "latam", "br")
 
