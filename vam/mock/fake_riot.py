@@ -133,8 +133,7 @@ psl:
             id_token: "{id_token}"
             is_dpop_bound: false
             last_token_creation_time: {last_ms}
-            max_duration_between_restores: {window}
-            original_token_creation_time: {original_ms}
+{window_line}            original_token_creation_time: {original_ms}
             refresh_token: "{refresh_token}"
             refresh_token_write_count: {writes}
             refresh_tokens_session_id: "{session_id}"
@@ -156,10 +155,13 @@ DEFAULT_RESTORE_WINDOW = 3566083
 
 def session_yaml(puuid: str, ttl_days: float = DEFAULT_RESTORE_WINDOW / 86400,
                  game_name: str = "MockPlayer", tag_line: str = "JP1",
-                 writes: int = 3) -> str:
+                 writes: int = 3, with_window: bool = True) -> str:
     """ログイン済み状態の RiotGamesPrivateSettings.yaml (現行形式)。
 
     ttl_days は「残り日数」。最後の発行時刻から逆算して組み立てる。
+
+    with_window=False で max_duration_between_restores を落とす。
+    新規ログイン直後の実機はこのフィールドを持たない。
     """
     window = DEFAULT_RESTORE_WINDOW
     now = time.time()
@@ -172,7 +174,8 @@ def session_yaml(puuid: str, ttl_days: float = DEFAULT_RESTORE_WINDOW / 86400,
         refresh_token="eyJlbmMiOiJtb2NrIn0." + secrets.token_urlsafe(96),
         last_ms=last_ms,
         original_ms=last_ms - 7_200_000,
-        window=window,
+        window_line=(f"            max_duration_between_restores: {window}\n"
+                     if with_window else ""),
         writes=writes,
         session_id=str(uuid.uuid4()),
     ) + _COOKIE_BLOCK.format(name="tdid", expiry=int(now + 365 * 86400),

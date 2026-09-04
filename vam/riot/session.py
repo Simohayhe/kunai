@@ -32,6 +32,11 @@ _COOKIE_RE = re.compile(
 
 INTERESTING_COOKIES = ("ssid", "clid", "csid", "tdid", "sub")
 
+# セッションを維持できる最大間隔 (max_duration_between_restores) は
+# アカウントや状況で大きく変わる。実機では 41.27 日 と 3.39 日 を観測した。
+# 新規ログイン直後はこのフィールド自体が無く、トークンが一度更新されてから現れる。
+# 決め打ちの既定値で見積もると桁違いに外すので、無いときは「不明」とする。
+
 
 class SessionError(Exception):
     pass
@@ -70,6 +75,7 @@ class SessionInfo:
     id_token: str = ""
     riot_id: str = ""
     kind: str = ""                  # "refresh_token" / "cookie" / ""
+    expiry_unknown: bool = False    # 期限がファイルに書かれていない
 
     def __post_init__(self):
         if self.cookies is None:
@@ -184,8 +190,12 @@ def _read_refresh_session(blobs: dict[str, bytes]) -> SessionInfo | None:
     issued_ms = entry.get("last_token_creation_time") or \
         entry.get("original_token_creation_time") or 0
     window = entry.get("max_duration_between_restores") or 0
-    if issued_ms and window:
+    if window and issued_ms:
         info.expires_at = issued_ms / 1000 + window
+    else:
+        # 新規ログイン直後はこのフィールドが無い。値はアカウントごとに
+        # 桁違いに変わるので、推測せず「不明」として扱う。
+        info.expiry_unknown = True
     return info
 
 

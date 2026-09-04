@@ -148,7 +148,7 @@ def test_session() -> None:
             check("空セッションの復元を拒否", True)
 
     # 旧 (ssid cookie) 形式も引き続き読めること
-    from vam.mock.fake_riot import cookie_session_yaml
+    from vam.mock.fake_riot import cookie_session_yaml, session_yaml
     legacy = session.inspect_blobs({
         "x.yaml": cookie_session_yaml("legacy-puuid", 30).encode("utf-8")})
     check("旧形式も読める", legacy.kind == "cookie" and legacy.valid, legacy.kind)
@@ -156,6 +156,16 @@ def test_session() -> None:
     check("旧形式の clid/csid/tdid",
           all(legacy.cookies.get(k) for k in ("clid", "csid", "tdid")))
     check("旧形式の puuid", legacy.puuid == "legacy-puuid")
+
+    # 新規ログイン直後は max_duration_between_restores が無い。
+    # 値はアカウントで桁違い (実機で 41.27 日 と 3.39 日) なので推測しない。
+    fresh = session.inspect_blobs({
+        "x.yaml": session_yaml("fresh-puuid", 30, with_window=False).encode("utf-8")})
+    check("期限フィールドが無くても有効と判定", fresh.valid)
+    check("期限は不明として扱う", fresh.expiry_unknown)
+    check("期限不明なら残り日数は 0", fresh.expires_in_days == 0.0)
+    check("期限不明を失効扱いにしない", not fresh.expired)
+    check("期限不明でも puuid は読める", fresh.puuid == "fresh-puuid")
 
     check("JWT の中身を読める",
           session.decode_jwt_payload(make_jwt("abc"))["sub"] == "abc")

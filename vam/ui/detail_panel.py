@@ -46,7 +46,8 @@ def _session_summary(info) -> str:
     if info.expired:
         return "失効 — 要再ログイン"
     if not info.expires_at:
-        return "有効 — 期限不明"
+        return ("有効 — 期限不明（ログイン直後は Riot 側が期限を書き込まないため。"
+                "一度ゲームを起動すると入る）")
     expires = time.strftime("%Y/%m/%d %H:%M", time.localtime(info.expires_at))
     return f"有効 — 残り {info.expires_in_days:.0f} 日（{expires} まで）"
 
@@ -61,7 +62,8 @@ def _session_banner_style(info) -> tuple[str, str]:
                 theme.ACCENT)
     days = info.expires_in_days
     if not info.expires_at:
-        return ("セッション有効 — 有効期限は読み取れませんでした", theme.TEXT_DIM)
+        return ("セッション有効 — 期限は未記載（ログイン直後は Riot 側が書き込まない）",
+                theme.TEXT_DIM)
     expires = time.strftime("%Y/%m/%d %H:%M", time.localtime(info.expires_at))
     text = f"セッション残り {days:.0f} 日  ·  {expires} まで  ·  更新のたびに延長されます"
     return text, (theme.WARN if days < EXPIRY_WARN_DAYS else theme.OK)
