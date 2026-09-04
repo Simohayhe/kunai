@@ -49,10 +49,27 @@ def decode_jwt_payload(token: str) -> dict:
 
 @dataclass
 class SessionInfo:
-    """セッションファイル群から読み取れた素性。"""
+    """セッションファイル群から読み取れた素性。
+
+    Riot Client のログイン保持には 2 通りある。
+
+    refresh_token 形式 (現行, v138 で確認):
+        psl.authorization.riot-client に OAuth の refresh_token と id_token を持つ。
+        ssid cookie は存在しない。有効期限は last_token_creation_time と
+        max_duration_between_restores から出る。
+
+    cookie 形式 (旧):
+        rso-authenticator に ssid cookie を持つ。
+
+    どちらでも扱えるようにしてある。
+    """
     puuid: str = ""
     expires_at: float = 0.0
     cookies: dict[str, str] = None  # type: ignore[assignment]
+    refresh_token: str = ""
+    id_token: str = ""
+    riot_id: str = ""
+    kind: str = ""                  # "refresh_token" / "cookie" / ""
 
     def __post_init__(self):
         if self.cookies is None:
@@ -60,7 +77,7 @@ class SessionInfo:
 
     @property
     def valid(self) -> bool:
-        return bool(self.cookies.get("ssid"))
+        return bool(self.refresh_token or self.cookies.get("ssid"))
 
     @property
     def expired(self) -> bool:
@@ -121,8 +138,68 @@ def _parse_cookies(text: str) -> list[dict]:
     ]
 
 
+def _walk_authorizations(node, found: list[dict]) -> None:
+    """refresh_token を持つ辞書を、入れ子のどこにあっても拾う。
+
+    実機では psl.authorization.riot-client に入っているが、
+    位置を決め打ちすると Riot 側の変更で読めなくなる。
+    """
+    if isinstance(node, dict):
+        if isinstance(node.get("refresh_token"), str) and node["refresh_token"]:
+            found.append(node)
+        for child in node.values():
+            _walk_authorizations(child, found)
+    elif isinstance(node, list):
+        for child in node:
+            _walk_authorizations(child, found)
+
+
+def _read_refresh_session(blobs: dict[str, bytes]) -> SessionInfo | None:
+    """現行 (refresh_token) 形式のセッションを読む。無ければ None。"""
+    entries: list[dict] = []
+    for data in blobs.values():
+        try:
+            import yaml
+            parsed = yaml.safe_load(data.decode("utf-8", errors="replace"))
+        except Exception:
+            continue
+        _walk_authorizations(parsed, entries)
+    if not entries:
+        return None
+
+    # 複数あれば、最後に発行されたものを使う
+    entry = max(entries, key=lambda e: e.get("last_token_creation_time", 0) or 0)
+    info = SessionInfo(kind="refresh_token",
+                       refresh_token=entry["refresh_token"],
+                       id_token=entry.get("id_token", "") or "")
+
+    claims = decode_jwt_payload(info.id_token) if info.id_token else {}
+    info.puuid = claims.get("sub", "") or ""
+    acct = claims.get("acct") or {}
+    if acct.get("game_name"):
+        info.riot_id = f"{acct.get('game_name')}#{acct.get('tag_line', '')}"
+
+    # 期限は「最後に更新してから max_duration_between_restores 秒」。
+    # id_token の exp はアクセス用の短い寿命なので使わない。
+    issued_ms = entry.get("last_token_creation_time") or \
+        entry.get("original_token_creation_time") or 0
+    window = entry.get("max_duration_between_restores") or 0
+    if issued_ms and window:
+        info.expires_at = issued_ms / 1000 + window
+    return info
+
+
 def inspect_blobs(blobs: dict[str, bytes]) -> SessionInfo:
     """保存済みセッション (ファイル名 -> 中身) から puuid と有効期限を読む。"""
+    refresh = _read_refresh_session(blobs)
+    if refresh and refresh.valid:
+        # cookie も併存するので、読めるものは拾っておく
+        refresh.cookies = _read_cookies(blobs)[0]
+        return refresh
+    return _inspect_cookie_blobs(blobs)
+
+
+def _read_cookies(blobs: dict[str, bytes]) -> tuple[dict[str, str], dict[str, float]]:
     cookies: dict[str, str] = {}
     expiry_times: dict[str, float] = {}
     for data in blobs.values():
@@ -135,8 +212,13 @@ def inspect_blobs(blobs: dict[str, bytes]) -> SessionInfo:
                         expiry_times[name] = float(cookie["expiryTime"])
                     except (TypeError, ValueError):
                         pass
+    return cookies, expiry_times
 
-    info = SessionInfo(cookies=cookies)
+
+def _inspect_cookie_blobs(blobs: dict[str, bytes]) -> SessionInfo:
+    """旧 (ssid cookie) 形式のセッションを読む。"""
+    cookies, expiry_times = _read_cookies(blobs)
+    info = SessionInfo(cookies=cookies, kind="cookie" if cookies.get("ssid") else "")
 
     # ssid が取れていればそれを使う。
     # 取れなかった場合に全文から JWT を拾うのは、cookie を 1 つも構造的に

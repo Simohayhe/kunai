@@ -118,9 +118,11 @@ def test_session() -> None:
         blobs = session.capture()
         info = session.inspect_blobs(blobs)
         check("puuid を読める", info.puuid == puuid, info.puuid)
-        check("ssid cookie を読める", bool(info.cookies.get("ssid")))
-        check("clid/csid/tdid も読める",
-              all(info.cookies.get(k) for k in ("clid", "csid", "tdid")))
+        check("現行形式と判定", info.kind == "refresh_token", info.kind)
+        check("refresh_token を読める", len(info.refresh_token) > 50)
+        check("id_token から Riot ID を読める",
+              info.riot_id == "MockPlayer#JP1", info.riot_id)
+        check("端末 ID (tdid) も併存する", bool(info.cookies.get("tdid")))
         check("有効判定", info.valid and not info.expired)
         check("残り日数", 29 < info.expires_in_days <= 30, f"{info.expires_in_days}")
 
@@ -144,6 +146,16 @@ def test_session() -> None:
             check("空セッションの復元を拒否", False)
         except session.SessionError:
             check("空セッションの復元を拒否", True)
+
+    # 旧 (ssid cookie) 形式も引き続き読めること
+    from vam.mock.fake_riot import cookie_session_yaml
+    legacy = session.inspect_blobs({
+        "x.yaml": cookie_session_yaml("legacy-puuid", 30).encode("utf-8")})
+    check("旧形式も読める", legacy.kind == "cookie" and legacy.valid, legacy.kind)
+    check("旧形式の ssid", bool(legacy.cookies.get("ssid")))
+    check("旧形式の clid/csid/tdid",
+          all(legacy.cookies.get(k) for k in ("clid", "csid", "tdid")))
+    check("旧形式の puuid", legacy.puuid == "legacy-puuid")
 
     check("JWT の中身を読める",
           session.decode_jwt_payload(make_jwt("abc"))["sub"] == "abc")
@@ -439,12 +451,13 @@ def test_session_renewal() -> None:
     from vam.service import AccountService
     from vam.storage import Vault
 
+    # cookie ローテーションは旧形式の話なので、その形で組み立てる
+    from vam.mock.fake_riot import cookie_session_yaml
+    puuid = "cccc0000-0000-0000-0000-00000000000c"
     env = FakeRiotEnv()
-    puuid = env.build(puuid="cccc0000-0000-0000-0000-00000000000c", ttl_days=10)
-
-    # --- update_cookies 単体 ---
-    with env:
-        blobs = session.capture()
+    env.build()
+    blobs = {"Data/RiotGamesPrivateSettings.yaml":
+             cookie_session_yaml(puuid, 10).encode("utf-8")}
     before = session.inspect_blobs(blobs)
     check("延長前の残り日数", 9 < before.expires_in_days <= 10,
           f"{before.expires_in_days}")

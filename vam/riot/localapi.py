@@ -40,7 +40,21 @@ class Lockfile:
         return f"Basic {token}"
 
 
-def read_lockfile() -> Lockfile | None:
+def _pid_alive(pid: int) -> bool:
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:
+        return True          # 判断できないなら生きている前提で進む
+
+
+def read_lockfile(check_alive: bool = True) -> Lockfile | None:
+    """lockfile を読む。プロセスが死んでいれば無いものとして扱う。
+
+    Riot Client を終了させても lockfile は残る。そのまま信じると、
+    もう誰も待っていないポートに接続しに行くことになる。
+    切り替えの直後は必ずこの状態になるので、生存確認を挟む。
+    """
     path = paths.lockfile_path()
     if not path:
         return None
@@ -48,9 +62,13 @@ def read_lockfile() -> Lockfile | None:
         parts = path.read_text(encoding="utf-8").strip().split(":")
         if len(parts) < 5:
             return None
-        return Lockfile(parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4])
+        lockfile = Lockfile(parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4])
     except (OSError, ValueError):
         return None
+
+    if check_alive and not _pid_alive(lockfile.pid):
+        return None
+    return lockfile
 
 
 @dataclass
@@ -82,11 +100,18 @@ class LocalClient:
     def get(self, path: str) -> dict:
         if not self.lockfile:
             raise LocalApiError("Riot Client が起動していません")
-        resp = self._session.get(
-            self.lockfile.base_url + path,
-            headers={"Authorization": self.lockfile.auth_header},
-            timeout=self.timeout,
-        )
+        try:
+            resp = self._session.get(
+                self.lockfile.base_url + path,
+                headers={"Authorization": self.lockfile.auth_header},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            # 古い lockfile が残っていると、誰もいないポートに繋ぎに行く。
+            # 呼び側が扱える例外に変えて、通信不能を普通の状態として扱う。
+            raise LocalApiError(
+                f"Riot Client のローカル API に接続できません ({exc.__class__.__name__})"
+            ) from exc
         if resp.status_code == 401:
             raise LocalApiError("ローカル API の認証に失敗しました。lockfile が古い可能性があります")
         if resp.status_code >= 400:

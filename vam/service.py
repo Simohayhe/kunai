@@ -121,7 +121,14 @@ class AccountService:
 
         account = Account(label=label or "取り込んだアカウント", puuid=info.puuid)
 
-        # クライアントが起動中なら Riot ID まで取れる
+        # 現行のセッションは id_token に Riot ID を持っている。
+        # クライアントが起動していなくてもここから取れる。
+        if info.riot_id:
+            account.riot_id = info.riot_id
+            if not label:
+                account.label = info.riot_id.split("#", 1)[0]
+
+        # クライアントが起動中なら region も取れる
         client = localapi.LocalClient()
         if client.available:
             try:

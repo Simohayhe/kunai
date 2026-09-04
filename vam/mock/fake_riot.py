@@ -101,8 +101,8 @@ def make_jwt(puuid: str, ttl_days: int = 30, no_exp: bool = False,
     return f"{header}.{payload}.{sig}"
 
 
-def session_yaml(puuid: str, ttl_days: int = 30) -> str:
-    """ログイン済み状態の RiotGamesPrivateSettings.yaml を組み立てる。"""
+def cookie_session_yaml(puuid: str, ttl_days: int = 30) -> str:
+    """旧 (ssid cookie) 形式のログイン済み状態。後方互換の確認用。"""
     expiry = int(time.time() + ttl_days * 86400)
     blocks = "".join(
         _COOKIE_BLOCK.format(name=name, expiry=expiry, value=value)
@@ -110,12 +110,73 @@ def session_yaml(puuid: str, ttl_days: int = 30) -> str:
             ("clid", make_jwt(puuid, ttl_days, cid="clid")),
             ("csid", make_jwt(puuid, ttl_days, cid="csid")),
             ("ssid", make_jwt(puuid, ttl_days)),
-            # tdid は端末 ID。実物と同じく sub も exp も持たせない
-            ("tdid", make_jwt(puuid, 0, no_exp=True, no_sub=True,
-                              id=secrets.token_hex(8), nonce=secrets.token_hex(8))),
+            ("tdid", _tdid_jwt()),
         )
     )
     return PRIVATE_SETTINGS_TEMPLATE + blocks
+
+
+def _tdid_jwt() -> str:
+    """端末 ID。実物と同じく sub も exp も持たない。"""
+    return make_jwt("", 0, no_exp=True, no_sub=True,
+                    id=secrets.token_hex(8), nonce=secrets.token_hex(8))
+
+
+# 現行 (Riot Client v138) の形。セッションは ssid cookie ではなく
+# psl.authorization.riot-client の OAuth refresh_token として保存される。
+# 期限は last_token_creation_time + max_duration_between_restores。
+REFRESH_SESSION_TEMPLATE = """\
+psl:
+    authorization:
+        riot-client:
+            claims: []
+            id_token: "{id_token}"
+            is_dpop_bound: false
+            last_token_creation_time: {last_ms}
+            max_duration_between_restores: {window}
+            original_token_creation_time: {original_ms}
+            refresh_token: "{refresh_token}"
+            refresh_token_write_count: {writes}
+            refresh_tokens_session_id: "{session_id}"
+            scopes:
+            - "openid"
+            - "link"
+            - "ban"
+            - "lol_region"
+            - "lol"
+            - "account"
+riot-login:
+    persist: null
+rso-authenticator:
+"""
+
+# 実機の値。約 41 日
+DEFAULT_RESTORE_WINDOW = 3566083
+
+
+def session_yaml(puuid: str, ttl_days: float = DEFAULT_RESTORE_WINDOW / 86400,
+                 game_name: str = "MockPlayer", tag_line: str = "JP1",
+                 writes: int = 3) -> str:
+    """ログイン済み状態の RiotGamesPrivateSettings.yaml (現行形式)。
+
+    ttl_days は「残り日数」。最後の発行時刻から逆算して組み立てる。
+    """
+    window = DEFAULT_RESTORE_WINDOW
+    now = time.time()
+    last_ms = int((now + ttl_days * 86400 - window) * 1000)
+    id_token = make_jwt(puuid, 1, aud="riot-client",
+                        acct={"game_name": game_name, "tag_line": tag_line},
+                        player_locale="ja-JP")
+    return REFRESH_SESSION_TEMPLATE.format(
+        id_token=id_token,
+        refresh_token="eyJlbmMiOiJtb2NrIn0." + secrets.token_urlsafe(96),
+        last_ms=last_ms,
+        original_ms=last_ms - 7_200_000,
+        window=window,
+        writes=writes,
+        session_id=str(uuid.uuid4()),
+    ) + _COOKIE_BLOCK.format(name="tdid", expiry=int(now + 365 * 86400),
+                             value=_tdid_jwt())
 
 
 class FakeRiotEnv:
