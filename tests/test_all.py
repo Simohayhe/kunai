@@ -571,6 +571,17 @@ def test_api_parsing() -> None:
     check("tier 名: 範囲外", api.tier_name(99) == "Unranked")
     check("未使用 tier は Unranked 扱い", api.tier_name(1) == "Unranked")
     check("シャード対応: latam→na", api.REGION_TO_SHARD["latam"] == "na")
+    # 実機のローカル API は LoL 由来のコード (jp1) を返す。
+    # そのままホスト名に入れると pd.jp1.a.pvp.net となり名前解決に失敗する。
+    check("jp1 は ap シャード", api.shard_for("jp1") == "ap")
+    check("na1 は na シャード", api.shard_for("na1") == "na")
+    check("euw1 は eu シャード", api.shard_for("euw1") == "eu")
+    check("oc1 は ap シャード", api.shard_for("oc1") == "ap")
+    check("大文字でも通る", api.shard_for("JP1") == "ap")
+    check("未知のリージョンは ap に寄せる", api.shard_for("zzz9") == "ap")
+    check("空でも落ちない", api.shard_for("") == "ap")
+    check("シャードは 4 種類に収まる",
+          set(api.REGION_TO_SHARD.values()) <= {"na", "eu", "ap", "kr", "pbe"})
 
     season = "sea-1"
     payload = {

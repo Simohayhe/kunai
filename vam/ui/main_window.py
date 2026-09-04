@@ -469,7 +469,12 @@ class MainWindow(QMainWindow):
         name = account.display_name if account else "アカウント"
         self._set_busy(False)
         self.reload_accounts()
-        if result["extended"]:
+        if result.get("not_applicable"):
+            message = (f"{name} は現行のセッション形式なので、延長操作は要りません。\n"
+                       "このアカウントで Riot Client を起動すれば、"
+                       "期限は自動で先に延びます。\n"
+                       f"残り {result['after_days']:.0f} 日")
+        elif result["extended"]:
             message = (f"{name} のセッションを延長しました。\n"
                        f"残り {result['before_days']:.0f} 日 → "
                        f"{result['after_days']:.0f} 日")

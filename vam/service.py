@@ -285,9 +285,45 @@ class AccountService:
         if info.expired:
             raise auth.SessionExpired("セッションが失効しています。ログインし直してください")
 
-        result = auth.reauth_with_cookies(info.cookies)
-        self._persist_rotated_cookies(account, blobs, info, result)
-        return result
+        if info.cookies.get("ssid"):
+            result = auth.reauth_with_cookies(info.cookies)
+            self._persist_rotated_cookies(account, blobs, info, result)
+            return result
+
+        # 現行 (refresh_token) 形式には ssid が無いので cookie 再認証は使えない。
+        # 起動中のクライアントからトークンを借りる。refresh_token を消費しないので、
+        # ローテーションで元のセッションを失効させる心配がない。
+        return self._authenticate_via_local_api(account)
+
+    def _authenticate_via_local_api(self, account: Account) -> auth.AuthResult:
+        client = localapi.LocalClient()
+        if not client.available:
+            raise ServiceError(
+                "Riot Client が起動していないため、このアカウントの情報を取得できません。"
+                "現行の Riot Client はセッションを refresh_token で持っており、"
+                "情報の取得には起動中のクライアントが要ります。"
+                "このアカウントに切り替えてから実行してください。"
+            )
+        try:
+            local = client.session()
+        except localapi.LocalApiError as exc:
+            raise ServiceError(f"ローカル API から取得できませんでした: {exc}") from exc
+
+        if account.puuid and local.puuid and local.puuid != account.puuid:
+            raise ServiceError(
+                f"今ログインしているのは別のアカウントです"
+                f"（{local.riot_id or local.puuid[:8]}）。"
+                "情報を取りたいアカウントに切り替えてから実行してください。"
+            )
+
+        return auth.AuthResult(
+            access_token=local.access_token,
+            entitlements_token=local.entitlements_token,
+            puuid=local.puuid or account.puuid,
+            game_name=local.game_name,
+            tag_line=local.tag_line,
+            region=local.region or account.region,
+        )
 
     def _persist_rotated_cookies(self, account: Account, blobs: dict[str, bytes],
                                  old: session.SessionInfo,
@@ -320,8 +356,23 @@ class AccountService:
         """セッションの有効期限を延ばすためだけの再認証。
 
         延長前後の残り日数を返す。UI の「セッションを延長」から呼ぶ。
+
+        現行 (refresh_token) 形式では、期限を延ばすのは Riot Client 自身の
+        仕事なので、ここでは何も起きない。そのアカウントで一度起動すれば
+        トークンが更新され、期限が先に延びる。
         """
         before = self.session_status(account)
+        if before.kind == "refresh_token":
+            progress(f"{account.display_name}: 現行形式のため延長操作は不要です")
+            return {
+                "account_id": account.id,
+                "extended": False,
+                "not_applicable": True,
+                "before_days": before.expires_in_days,
+                "after_days": before.expires_in_days,
+                "expires_at": before.expires_at,
+            }
+
         progress(f"{account.display_name}: セッションを延長中…")
         self.authenticate(account)
         after = self.session_status(account)
@@ -334,6 +385,7 @@ class AccountService:
         return {
             "account_id": account.id,
             "extended": extended,
+            "not_applicable": False,
             "before_days": before.expires_in_days,
             "after_days": after.expires_in_days,
             "expires_at": after.expires_at,

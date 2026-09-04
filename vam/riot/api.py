@@ -11,12 +11,32 @@ import requests
 
 from .auth import AuthResult, client_platform_header
 
-# リージョン -> シャード。北米系は 3 つとも na シャードに乗っている。
+# リージョン -> シャード。
+# VALORANT のシャードは na / eu / ap / kr の 4 つしかない。
+# 一方 Riot Client のローカル API は LoL 由来のリージョン コード (jp1 など) を
+# 返してくる。実機で確認したところ日本は "jp1" で、これは ap シャードに乗る。
+# そのままホスト名に埋めると pd.jp1.a.pvp.net となり名前解決に失敗する。
 REGION_TO_SHARD = {
+    # VALORANT のリージョン表記
     "na": "na", "latam": "na", "br": "na",
     "eu": "eu", "ap": "ap", "kr": "kr", "pbe": "pbe",
+    # Riot Client / LoL 由来のコード
+    "na1": "na", "br1": "na", "la1": "na", "la2": "na",
+    "euw1": "eu", "eun1": "eu", "tr1": "eu", "ru": "eu", "me1": "eu",
+    "jp1": "ap", "oc1": "ap", "ph2": "ap", "sg2": "ap",
+    "th2": "ap", "tw2": "ap", "vn2": "ap", "sea": "ap",
 }
 REGIONS = ("ap", "na", "eu", "kr", "latam", "br")
+
+
+def shard_for(region: str) -> str:
+    """リージョン表記からシャードを決める。未知なら ap に寄せる。"""
+    region = (region or "").lower()
+    if region in REGION_TO_SHARD:
+        return REGION_TO_SHARD[region]
+    # 末尾の数字を落として再照合 (jp1 -> jp のような表記ゆれ向け)
+    trimmed = region.rstrip("0123456789")
+    return REGION_TO_SHARD.get(trimmed, "ap")
 
 # 所持品の種別 ID
 ITEM_TYPE = {
@@ -106,7 +126,7 @@ class ValorantApi:
                  timeout: float = 15.0):
         self.auth = auth
         self.region = (region or "ap").lower()
-        self.shard = REGION_TO_SHARD.get(self.region, self.region)
+        self.shard = shard_for(self.region)
         self.client_version = client_version
         self.timeout = timeout
         self._session = session or requests.Session()

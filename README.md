@@ -209,45 +209,69 @@ VALORANT が入っていなくても全項目が走る。`vam/mock/fake_riot.py`
 
 ## セッションファイルの形
 
-切り替えの土台になるファイルなので、実機 (Riot Client 134.x) で確認した形を残しておく。
+切り替えの土台になるファイルなので、実機で確認した形を残しておく。
 `%LOCALAPPDATA%\Riot Games\Riot Client\Data\RiotGamesPrivateSettings.yaml`
+
+### 現行 (Riot Client v138)
+
+**ssid cookie は存在しない。** ログイン状態は OAuth の refresh_token として持つ。
 
 ```yaml
 psl:
     authorization:
-        riot-client: null
+        riot-client:
+            id_token: "eyJraWQiOi..."          # sub=puuid, acct={game_name, tag_line}
+            refresh_token: "eyJlbmMiOi..."     # JWE。中身は読めない
+            last_token_creation_time: 1788488425923
+            max_duration_between_restores: 3566083   # 約 41 日
+            refresh_token_write_count: 3       # 使うたびに増える
 riot-login:
-    persist: null            # ログイン情報を保存していないと null
+    persist: null                              # ログイン中でも null のまま
 rso-authenticator:
-    ssid:                    # 名前付きマッピング。リストではない
-        domain: "riotgames.com"
-        expiryTime: 1820012619   # cookie の寿命はここ
-        hostOnly: false
-        httpOnly: true
-        name: "ssid"         # 名前も値も引用符付き
-        path: "/"
-        persistent: true
-        secureOnly: true
-        value: "eyJhbGciOi..."
-    tdid:
-        ...
+    tdid: { ... }                              # 端末 ID だけ
 ```
 
-引っかかりやすい点:
+- **有効期限** = `last_token_creation_time / 1000 + max_duration_between_restores`
+- **puuid** は `id_token` の `sub`、**Riot ID** は `acct`。
+  クライアントが起動していなくても取れる
+- 期限を延ばすのは Riot Client 自身の仕事。そのアカウントで一度起動すれば
+  トークンが更新され、期限が先に延びる。アプリ側からの延長操作は要らない
+- Riot Client を terminate しても、終了時にこのファイルは書き換えられない
+  (ハッシュ・mtime とも不変)。だから終了前に退避してよい
 
-- **cookie 名も値も引用符で囲まれる。** 素朴に `name:\s*(\w+)` で拾うと 1 件も取れない
-- **寿命は JWT の `exp` ではなく `expiryTime`。** `tdid` の JWT はクレームが
-  `iat` / `id` / `nonce` だけで、`exp` も `sub` も持たない
-- **`ssid` が無ければ未ログイン。** そこにある別の JWT を代用してはいけない
-- 読み取りは PyYAML、書き戻しは行単位の差し替え。YAML を書き直すと引用符や
-  並び順が変わり、Riot Client 側が読めなくなる危険がある
+### 旧 (ssid cookie)
 
-## 注意
+`rso-authenticator` に ssid / clid / csid を持つ形。読み取りは両対応。
+
+- cookie 名も値も引用符で囲まれる。素朴に `name:\s*(\w+)` で拾うと 1 件も取れない
+- 寿命は JWT の `exp` ではなく `expiryTime`。`tdid` の JWT は
+  クレームが `iat` / `id` / `nonce` だけで、`exp` も `sub` も持たない
+
+読み取りは PyYAML。位置を決め打ちせず、`refresh_token` を持つ辞書や
+`name`/`value` を持つ辞書を入れ子から拾う。書き戻しは行単位の差し替え
+(YAML を書き直すと引用符や並び順が変わり、Riot Client 側が読めなくなる危険がある)。
+
+## 情報の取得経路
+
+ランク・ウォレット・所持品・戦績は `pd.<shard>.a.pvp.net` から引く。
+アクセストークンの取り方はセッション形式で変わる。
+
+| セッション形式 | 取得方法 |
+|---|---|
+| 現行 (refresh_token) | **起動中の Riot Client のローカル API から借りる。** refresh_token を消費しないので、ローテーションで元のセッションを失効させる心配がない。そのアカウントに切り替えている必要がある |
+| 旧 (ssid cookie) | cookie 再認証 (RSO reauth)。切り替え不要 |
+
+> **リージョンとシャードは別物。** ローカル API は LoL 由来のコード (`jp1` など) を
+> 返すが、VALORANT のシャードは `na` / `eu` / `ap` / `kr` の 4 つしかない。
+> 日本は `jp1` → `ap`。そのままホスト名に入れると `pd.jp1.a.pvp.net` となり
+> 名前解決に失敗する。
+
+## 注意## 注意
 
 - **アカウント切り替えは Riot Client を終了させる。** ゲーム中に実行すると確認を求められる
 - Riot Vanguard（カーネルドライバ）には触らない。停止すると再起動が必要になるため
 - 自動入力は Riot Client の画面構成 (入力欄の位置) に依存する。Riot 側の変更で壊れうるので、通常はセッション方式を使う
 - ログイン画面は hCaptcha で保護されている。本アプリは captcha に一切触れないし、サインインも押さない
-- **cookie のローテーション挙動は実アカウントでは未検証**（開発機に VALORANT が入っていないため）。
-  Riot が cookie を更新しない場合は延長されず、その旨がダイアログに出る
+- 現行形式では、ランクや所持品の取得に**起動中の Riot Client が要る**。
+  他のアカウントの情報を見るには、そのアカウントに切り替えてから更新する
 - 取得するのは自分のアカウントの情報のみ。他プレイヤーの情報を覗く機能は入れていない
