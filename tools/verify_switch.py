@@ -57,17 +57,15 @@ def cmd_add() -> int:
     vault = open_vault()
     svc = AccountService(vault)
 
-    info = session.current_session_info()
-    if not info.valid:
-        print(f"{NG}ログイン済みセッションがありません。")
-        print("      Riot Client でログインしてから、もう一度実行してください。")
-        return 1
-
     try:
         account = svc.import_current()
     except ServiceError as exc:
-        print(f"{WARN}{exc}")
-        return 0
+        # 登録済みなのか、そもそもセッションが無いのかを取り違えないよう、
+        # サービス層の説明をそのまま出す
+        marker = WARN if "登録済み" in str(exc) else NG
+        print(f"{marker}{exc}")
+        cmd_list()
+        return 0 if marker is WARN else 1
 
     print(f"{OK}取り込みました: {account.display_name} / "
           f"{account.riot_id or '(Riot ID 不明)'} / 残り "

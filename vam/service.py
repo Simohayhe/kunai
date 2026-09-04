@@ -90,10 +90,7 @@ class AccountService:
         blobs = session.capture()
         info = session.inspect_blobs(blobs)
         if not info.valid:
-            raise ServiceError(
-                "ログイン状態が見つかりません。Riot Client でログインし、"
-                "「ログイン情報を保存する」を有効にしてから取り込んでください。"
-            )
+            raise ServiceError(self._no_session_reason())
         if info.expired:
             raise ServiceError("このセッションは既に失効しています")
 
@@ -109,11 +106,40 @@ class AccountService:
         progress(f"{account.display_name} のセッションを保存しました")
         return account
 
+    def _no_session_reason(self) -> str:
+        """セッションが保存されていない理由を、できるだけ具体的に説明する。
+
+        ローカル API ではログインが見えているのにセッションが無い、という
+        状態がありうる。「サインイン状態を維持」を入れずにログインした場合で、
+        このときクライアントは refresh_token をディスクに残さない。
+        単に「見つかりません」と言われても原因が分からないので切り分ける。
+        """
+        client = localapi.LocalClient()
+        if client.available:
+            try:
+                live = client.session()
+            except localapi.LocalApiError:
+                live = None
+            if live and live.puuid:
+                who = live.riot_id or live.puuid[:8]
+                return (
+                    f"{who} でログインしていますが、セッションが保存されていません。\n"
+                    "ログイン時に「サインイン状態を維持」を有効にしていないと、"
+                    "Riot Client はログイン状態をディスクに残しません。\n"
+                    "一度サインアウトし、「サインイン状態を維持」にチェックを入れて"
+                    "ログインし直してから、もう一度取り込んでください。"
+                )
+        return (
+            "ログイン中のアカウントが見つかりません。\n"
+            "Riot Client でログインし、そのとき「サインイン状態を維持」を"
+            "有効にしてください。"
+        )
+
     def import_current(self, label: str = "", progress: Progress = _noop) -> Account:
         """今ログイン中のアカウントを新規登録する。"""
         info = self.current_session_info()
         if not info.valid:
-            raise ServiceError("ログイン中のアカウントが見つかりません")
+            raise ServiceError(self._no_session_reason())
 
         for acc in self.vault.accounts():
             if acc.puuid and acc.puuid == info.puuid:
