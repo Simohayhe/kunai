@@ -403,6 +403,15 @@ def test_autologin_geometry() -> None:
           autologin.is_checkbox_checked((196, 48, 62)) is True)
     check("判別できない色は None",
           autologin.is_checkbox_checked((100, 90, 70)) is None)
+    # 座標がずれてボタンや背景に乗ったときは触らせない
+    check("フォーム背景(ほぼ白)は None",
+          autologin.is_checkbox_checked((252, 252, 252)) is None)
+    check("Facebook の青は None",
+          autologin.is_checkbox_checked((24, 119, 242)) is None)
+    check("Xbox の緑は None",
+          autologin.is_checkbox_checked((16, 124, 16)) is None)
+    check("Apple の黒は無彩色だが背景ではない",
+          autologin.is_checkbox_checked((20, 20, 20)) is False)
 
     # 「サインイン状態を維持」の設定。既定は有効
     import tempfile as _tf

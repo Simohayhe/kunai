@@ -340,20 +340,29 @@ def get_pixel(x: int, y: int) -> tuple[int, int, int]:
     return (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF)
 
 
+# ほぼ白ならフォーム背景。チェックボックスではない
+BACKGROUND_MIN = 246
+
+
 def is_checkbox_checked(rgb: tuple[int, int, int]) -> bool | None:
     """チェックボックスの色から状態を判定する。
 
-    未チェックは無彩色の枠、チェック済みは Riot の赤。
+    未チェックは無彩色の枠 (背景より少し暗い)、チェック済みは Riot の赤。
     ウィンドウが非アクティブだと全体が暗転して色が沈むので、
     明るさではなく「赤みがあるか」で見る。
-    判別できないときは None を返し、呼び側では触らない。
+
+    ほぼ白、あるいは赤以外の有彩色なら、そこはチェックボックスではない。
+    その場合は None を返す。ボタンの上で Space を押してしまうと
+    ソーシャルログインが起動しかねないので、判別できないときは触らない。
     """
     r, g, b = rgb
-    if abs(r - g) <= 12 and abs(g - b) <= 12:
-        return False                      # 無彩色 = 未チェック
     if r - max(g, b) >= 15:
         return True                       # 赤み = チェック済み
-    return None
+    if abs(r - g) <= 12 and abs(g - b) <= 12:
+        if max(rgb) >= BACKGROUND_MIN:
+            return None                   # ほぼ白 = 背景
+        return False                      # 無彩色 = 未チェック
+    return None                           # 赤以外の有彩色 = 別の部品
 
 
 def stay_signed_in_state(window: Window) -> bool | None:
@@ -370,20 +379,25 @@ def stay_signed_in_state(window: Window) -> bool | None:
     )
 
 
-def _has_focus_ring(window: Window) -> bool:
+def _has_focus_ring(window: Window, required: int = 2) -> bool:
     """チェックボックスにフォーカスリングが出ているか。
 
     Tab で回ってきたかを判定するのに使う。周囲 4 点のうち、
-    他より明らかに暗い点があればリングが描かれている。
+    他より明らかに暗い点が required 個以上あればリングとみなす。
     明るさの絶対値ではなく相対差で見るので、画面の暗転に影響されない。
+
+    実測ではリングは角丸で、4 点のうち 2 点に乗った。1 点だけで
+    判定すると、たまたま暗い何かに反応してボタン上で Space を
+    押しかねないので 2 点以上を要求する。
     """
     x, y = field_position(window, STAY_SIGNED_IN)
     points = [(x - 12, y), (x + 12, y), (x, y - 12), (x, y + 12)]
     lums = sorted(sum(get_pixel(px, py)) for px, py in points)
-    return lums[0] < lums[len(lums) // 2] - 200
+    threshold = lums[-1] - 200
+    return sum(1 for value in lums if value < threshold) >= required
 
 
-def ensure_stay_signed_in(window: Window, max_tabs: int = 12) -> bool:
+def ensure_stay_signed_in(window: Window, max_tabs: int = 25) -> bool:
     """「サインイン状態を維持」を有効にする。キーボードだけで行う。
 
     Tab を送りながらフォーカスリングを見て、チェックボックスに
@@ -395,6 +409,8 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 12) -> bool:
     切り替えに使えなくなるため。
 
     実測 (Riot Client v138.0.1): ユーザー名欄から Tab 7 回で到達する。
+    ただし開始位置は状況で変わるので、フォームを一周できるだけの
+    回数を回す。フォーカスが既に先へ行っていても拾えるようにするため。
     """
     if stay_signed_in_state(window) is True:
         return True
@@ -404,9 +420,18 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 12) -> bool:
         time.sleep(0.35)
         if not _has_focus_ring(window):
             continue
-        if stay_signed_in_state(window) is not True:
-            press(VK_SPACE)
-            time.sleep(0.4)
+
+        # リングが出ていても、そこに「未チェックのチェックボックス」が
+        # 見えていなければ押さない。ソーシャルログインのボタン上で
+        # Space を押すと OAuth が始まってしまう。
+        state = stay_signed_in_state(window)
+        if state is True:
+            return True
+        if state is not False:
+            return False
+
+        press(VK_SPACE)
+        time.sleep(0.4)
         return stay_signed_in_state(window) is True
     return False
 
