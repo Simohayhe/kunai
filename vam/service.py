@@ -174,10 +174,87 @@ class AccountService:
     def session_status(self, account: Account) -> session.SessionInfo:
         return session.inspect_blobs(self.vault.read_session_blobs(account.id))
 
+    # -- 保存済みセッションの追従 ------------------------------------------
+    def sync_current_session(self) -> Account | None:
+        """今ログイン中のアカウントの保存済みセッションを最新に保つ。
+
+        refresh_token は使うたびにローテーションする。クライアントが起動して
+        トークンを更新すると、保管庫に持っている古いコピーはその時点で失効する。
+        そのまま次の切り替えで書き戻しても Riot に拒否され、クライアントは
+        セッションファイルを消してログイン画面に戻る。
+
+        なので「今ディスクにあるもの」と「保管庫にあるもの」が食い違ったら、
+        黙って追従させる。これを怠ると、1 回使ったアカウントには
+        二度と切り替えられなくなる。
+
+        更新したアカウントを返す。何もしなければ None。
+        """
+        try:
+            blobs = session.capture()
+        except session.SessionError:
+            return None
+
+        info = session.inspect_blobs(blobs)
+        if not info.valid or not info.puuid:
+            return None
+
+        account = next((a for a in self.vault.accounts()
+                        if a.puuid and a.puuid == info.puuid), None)
+        if account is None:
+            return None
+
+        if self.vault.read_session_blobs(account.id) == blobs:
+            return None                      # 既に最新
+
+        self.vault.clear_session(account.id)
+        for rel, data in blobs.items():
+            self.vault.write_session_blob(account.id, rel, data)
+        account.session_saved = True
+        account.session_saved_at = time.time()
+        self.vault.update(account)
+        return account
+
+    def wait_and_capture(self, account: Account, timeout: float = 120.0,
+                         progress: Progress = _noop) -> bool:
+        """切り替え後、クライアントがログインし終えてから取り込み直す。
+
+        起動時にトークンが更新されるので、そのあとの状態を保存しないと
+        保管庫のコピーが一世代古いままになる。
+        """
+        if process.mock_mode():
+            # モック環境には待つ相手がいない。復元済みの内容をそのまま取り込む
+            try:
+                self.capture_into(account)
+                return True
+            except ServiceError:
+                return False
+
+        deadline = time.time() + timeout
+        progress(f"{account.display_name}: ログイン完了を待っています…")
+        while time.time() < deadline:
+            client = localapi.LocalClient()
+            if client.available:
+                try:
+                    live = client.session()
+                except localapi.LocalApiError:
+                    live = None
+                if live and live.puuid == account.puuid:
+                    # 書き込みが落ち着くまで少し待ってから取り込む
+                    time.sleep(3)
+                    try:
+                        self.capture_into(account)
+                        progress(f"{account.display_name}: セッションを最新に更新しました")
+                        return True
+                    except ServiceError:
+                        return False
+            time.sleep(2)
+        progress(f"{account.display_name}: ログイン完了を確認できませんでした")
+        return False
+
     # -- 切り替え -----------------------------------------------------------
     def switch(self, account: Account, launch_game: bool = True,
                force: bool = False, allow_autologin: bool = True,
-               submit_login: bool = True,
+               submit_login: bool = True, recapture: bool = True,
                progress: Progress = _noop) -> SwitchResult:
         """指定アカウントに切り替える。
 
@@ -269,6 +346,19 @@ class AccountService:
         account.last_used_at = time.time()
         self.vault.update(account)
         progress(f"{account.display_name} に切り替えました")
+
+        # 起動したなら、ログインし終えた後の状態を保存し直す。
+        # クライアントは起動時に refresh_token を更新するので、
+        # ここで取り込まないと保管庫のコピーが一世代古いままになり、
+        # 次回の切り替えで Riot に拒否される。
+        if launched and recapture:
+            if not self.wait_and_capture(account, progress=progress):
+                warnings.append(
+                    "ログイン後のセッションを取り込めませんでした。"
+                    "次回このアカウントに切り替えられない可能性があります。"
+                    "ログインが済んだら「現在のログインをこのアカウントに保存」を実行してください。"
+                )
+
         return SwitchResult(account.id, method, launched, warnings)
 
     def _preserve_current(self, progress: Progress, warnings: list[str]) -> None:

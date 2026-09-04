@@ -330,6 +330,15 @@ class MainWindow(QMainWindow):
     # ==================================================================
     def refresh_environment(self) -> None:
         env = self.service.environment()
+
+        # 保存済みセッションを最新に保つ。refresh_token はクライアントが
+        # 起動するたび更新され、古いコピーはその時点で失効するため。
+        try:
+            if self.service.sync_current_session() is not None:
+                self._update_session_badges()
+        except Exception:
+            pass
+
         info = self.service.current_session_info()
 
         current = None
