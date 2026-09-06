@@ -70,7 +70,7 @@ def client_running() -> bool:
     return bool(running(CLIENT_PROCESSES))
 
 
-def stop_all(timeout: float = 12.0, include_game: bool = True) -> list[str]:
+def stop_all(timeout: float = 8.0, include_game: bool = True) -> list[str]:
     """Riot Client (と任意でゲーム本体) を終了させ、終了させた名前を返す。
 
     まず terminate で行儀よく頼み、粘るものだけ kill する。
@@ -97,15 +97,15 @@ def stop_all(timeout: float = 12.0, include_game: bool = True) -> list[str]:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         remaining = max(0.5, deadline - time.time())
-        gone, alive = psutil.wait_procs(procs, timeout=min(4.0, remaining))
+        gone, alive = psutil.wait_procs(procs, timeout=min(2.0, remaining))
         for p in alive:
             try:
                 p.kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        psutil.wait_procs(alive, timeout=3.0)
+        psutil.wait_procs(alive, timeout=2.0)
 
     # ファイルハンドルが解放されるまでの猶予
     while time.time() < deadline and running(order):
-        time.sleep(0.3)
+        time.sleep(0.2)
     return stopped

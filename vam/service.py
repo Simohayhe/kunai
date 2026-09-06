@@ -100,6 +100,7 @@ class AccountService:
 
         account.session_saved = True
         account.session_saved_at = time.time()
+        account.session_rejected = False
         if info.puuid:
             account.puuid = info.puuid
         self.vault.update(account)
@@ -311,10 +312,15 @@ class AccountService:
         info = session.inspect_blobs(blobs) if blobs else session.SessionInfo()
 
         method = "session"
-        if not info.valid or info.expired:
+        can_autologin = allow_autologin and account.username and account.password
+        if account.session_rejected and can_autologin:
+            # 前回この保存セッションは Riot に拒否された。試すだけ時間の無駄。
+            progress("前回失効していたセッションなので、自動ログインで入ります")
+            method = "autologin"
+        elif not info.valid or info.expired:
             if info.expired:
                 warnings.append("保存されたセッションが失効していました")
-            if allow_autologin and account.username and account.password:
+            if can_autologin:
                 method = "autologin"
             else:
                 raise ServiceError(
@@ -359,6 +365,8 @@ class AccountService:
                 )
                 recapture = False
             elif allow_autologin and account.username and account.password:
+                account.session_rejected = True
+                self.vault.update(account)
                 progress("保存セッションが通りませんでした。自動ログインに切り替えます…")
                 warnings.append(
                     "保存されていたセッションは Riot 側で失効していました。"
@@ -366,6 +374,8 @@ class AccountService:
                 )
                 method = "autologin"
             else:
+                account.session_rejected = True
+                self.vault.update(account)
                 warnings.append(
                     "保存されていたセッションは Riot 側で失効していました。"
                     "このアカウントでログインし直して取り込み直すか、"

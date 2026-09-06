@@ -68,6 +68,8 @@ class Account:
     favorite: bool = False
     session_saved: bool = False
     session_saved_at: float = 0.0
+    # 復元したが Riot に拒否された。次回は試さず自動ログインへ回す
+    session_rejected: bool = False
     last_used_at: float = 0.0
     created_at: float = field(default_factory=time.time)
     rank: RankInfo = field(default_factory=RankInfo)

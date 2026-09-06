@@ -117,7 +117,7 @@ def click_at(x: int, y: int, settle: float = 0.25) -> None:
     time.sleep(settle)
 
 
-def type_text(text: str, delay: float = 0.012) -> None:
+def type_text(text: str, delay: float = 0.005) -> None:
     """1 文字ずつ Unicode で送る。IME やキーボード配列の影響を受けない。"""
     for ch in text:
         for code in _utf16_units(ch):
@@ -220,7 +220,7 @@ LOADED_MIN_WIDTH = 800
 
 def wait_for_login_window(timeout: float = 120.0,
                           min_width: int = LOADED_MIN_WIDTH,
-                          stable_for: float = 1.5) -> Window:
+                          stable_for: float = 0.8) -> Window:
     """ログイン画面が「出来上がる」まで待つ。
 
     起動直後はスプラッシュ (600x600 程度) が出て、読み込みが終わると
@@ -257,7 +257,7 @@ SW_RESTORE = 9
 VK_MENU = 0x12
 
 
-def focus(window: Window, settle: float = 0.6) -> None:
+def focus(window: Window, settle: float = 0.35) -> None:
     """ウィンドウを本当にアクティブにする。
 
     SetForegroundWindow を単に呼ぶだけだと、最前面に出はするが
@@ -397,7 +397,7 @@ def _has_focus_ring(window: Window, required: int = 2) -> bool:
     return sum(1 for value in lums if value < threshold) >= required
 
 
-def ensure_stay_signed_in(window: Window, max_tabs: int = 25) -> bool:
+def ensure_stay_signed_in(window: Window, max_tabs: int = 14) -> bool:
     """「サインイン状態を維持」を有効にする。キーボードだけで行う。
 
     Tab を送りながらフォーカスリングを見て、チェックボックスに
@@ -417,7 +417,7 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 25) -> bool:
 
     for _ in range(max_tabs):
         press(VK_TAB)
-        time.sleep(0.35)
+        time.sleep(0.18)
         if not _has_focus_ring(window):
             continue
 
@@ -437,7 +437,7 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 25) -> bool:
 
 
 def perform_login(username: str, password: str, window: Window | None = None,
-                  submit: bool = True, settle: float = 1.2,
+                  submit: bool = True, settle: float = 0.5,
                   stay_signed_in: bool = True) -> dict:
     """ログイン画面にユーザー名とパスワードを打ち込み、サインインする。
 
@@ -466,7 +466,7 @@ def perform_login(username: str, password: str, window: Window | None = None,
     type_text(username)
 
     press(VK_TAB)
-    time.sleep(0.15)
+    time.sleep(0.08)
     press(VK_A, modifiers=(VK_CONTROL,))
     press(VK_BACK)
     type_text(password)
@@ -476,7 +476,7 @@ def perform_login(username: str, password: str, window: Window | None = None,
 
     submitted = False
     if submit:
-        time.sleep(0.3)
+        time.sleep(0.15)
         press(VK_RETURN)
         submitted = True
 
