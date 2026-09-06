@@ -461,6 +461,24 @@ def _rewind_focus(steps: int) -> None:
         time.sleep(0.15)
 
 
+def ensure_active(window: Window, attempts: int = 3) -> bool:
+    """入力前に、対象ウィンドウが確実に前面かを確かめる。
+
+    画素の読み取りも SendInput も「画面の一番手前」に対して働く。
+    Riot のウィンドウが前面でないと、別のアプリの色を読み、
+    別のアプリにキーを送ってしまう。パスワードを扱う以上、
+    ここは黙って進めてはいけない。
+    """
+    for _ in range(attempts):
+        if is_active(window):
+            return True
+        try:
+            focus(window)
+        except AutoLoginError:
+            time.sleep(0.4)
+    return is_active(window)
+
+
 def wait_for_login_form(window: Window, timeout: float = 60.0) -> bool:
     """ログインフォームが実際に描画されるまで待つ。
 
@@ -474,6 +492,11 @@ def wait_for_login_form(window: Window, timeout: float = 60.0) -> bool:
     deadline = time.time() + timeout
     ready = 0
     while time.time() < deadline:
+        # 前面でないと手前の別ウィンドウの色を読んでしまう。毎回確かめる。
+        if not ensure_active(window, attempts=1):
+            ready = 0
+            time.sleep(0.5)
+            continue
         if stay_signed_in_state(window) is not None:
             ready += 1
             if ready >= 2:          # 描画途中の一瞬を拾わない
@@ -520,12 +543,24 @@ def perform_login(username: str, password: str, window: Window | None = None,
     # 起動直後のログイン画面はユーザー名欄にフォーカスが載っている。
     # ウィンドウを正しくアクティブ化できていれば、クリックは要らない。
     # 既存の入力を消してから打つ
+    if not ensure_active(w):
+        raise AutoLoginError(
+            "Riot Client を前面に保てませんでした。"
+            "別のウィンドウに入力してしまうため中止しました。"
+        )
     press(VK_A, modifiers=(VK_CONTROL,))
     press(VK_BACK)
     type_text(username)
 
     press(VK_TAB)
     time.sleep(0.08)
+
+    # パスワードは特に慎重に。ここで前面を失っていたら打たずに止める。
+    if not ensure_active(w):
+        raise AutoLoginError(
+            "入力の途中で Riot Client が前面でなくなりました。"
+            "パスワードを別のウィンドウに入力しないよう中止しました。"
+        )
     press(VK_A, modifiers=(VK_CONTROL,))
     press(VK_BACK)
     type_text(password)
