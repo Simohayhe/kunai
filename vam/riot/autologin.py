@@ -4,8 +4,10 @@ Riot Client のログイン画面にキー入力を送り込む。
 Riot が画面構成を変えると壊れる方式なので、あくまで保険。
 通常は session.py のセッション復元を使うこと。
 
-流れは ユーザー名 → Tab → パスワード → 「サインイン状態を維持」 → Enter。
+流れは 「サインイン状態を維持」 → ユーザー名 → Tab → パスワード → Enter。
 すべてキーボードで行う。座標クリックには頼らない。
+チェックボックスを先に片付けるのは、パスワードの直後に Tab を
+挟まないため。処理後は Shift+Tab で入力欄へ戻る。
 
 実機で確かめた要点:
   - ウィンドウを正しくアクティブ化できていれば、起動直後のログイン画面は
@@ -48,6 +50,7 @@ VK_BACK = 0x08
 VK_CONTROL = 0x11
 VK_A = 0x41
 VK_SPACE = 0x20
+VK_SHIFT = 0x10
 
 
 class AutoLoginError(Exception):
@@ -397,7 +400,8 @@ def _has_focus_ring(window: Window, required: int = 2) -> bool:
     return sum(1 for value in lums if value < threshold) >= required
 
 
-def ensure_stay_signed_in(window: Window, max_tabs: int = 14) -> bool:
+def ensure_stay_signed_in(window: Window, max_tabs: int = 14,
+                          restore_focus: bool = True) -> bool:
     """「サインイン状態を維持」を有効にする。キーボードだけで行う。
 
     Tab を送りながらフォーカスリングを見て、チェックボックスに
@@ -415,7 +419,7 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 14) -> bool:
     if stay_signed_in_state(window) is True:
         return True
 
-    for _ in range(max_tabs):
+    for used in range(1, max_tabs + 1):
         press(VK_TAB)
         time.sleep(0.18)
         if not _has_focus_ring(window):
@@ -426,14 +430,33 @@ def ensure_stay_signed_in(window: Window, max_tabs: int = 14) -> bool:
         # Space を押すと OAuth が始まってしまう。
         state = stay_signed_in_state(window)
         if state is True:
+            _rewind_focus(used if restore_focus else 0)
             return True
         if state is not False:
+            _rewind_focus(used if restore_focus else 0)
             return False
 
         press(VK_SPACE)
-        time.sleep(0.4)
-        return stay_signed_in_state(window) is True
+        time.sleep(0.25)
+        result = stay_signed_in_state(window) is True
+        _rewind_focus(used if restore_focus else 0)
+        return result
+
+    _rewind_focus(max_tabs if restore_focus else 0)
     return False
+
+
+def _rewind_focus(steps: int) -> None:
+    """Shift+Tab で元の位置までフォーカスを戻す。
+
+    チェックボックスを先に処理してから入力欄へ戻ることで、
+    パスワードを打った直後に余計なキーを挟まず Enter まで行ける。
+    """
+    for _ in range(steps):
+        press(VK_TAB, modifiers=(VK_SHIFT,))
+        time.sleep(0.04)
+    if steps:
+        time.sleep(0.15)
 
 
 def perform_login(username: str, password: str, window: Window | None = None,
@@ -458,6 +481,11 @@ def perform_login(username: str, password: str, window: Window | None = None,
     focus(w)
     time.sleep(settle)
 
+    # 「サインイン状態を維持」は先に片付ける。既に有効なら画素を 1 点
+    # 読むだけで済む。無効なら Tab で探して入れ、Shift+Tab で入力欄へ戻る。
+    # 後回しにすると、パスワードを打った直後に Tab が挟まってしまう。
+    kept = ensure_stay_signed_in(w) if stay_signed_in else None
+
     # 起動直後のログイン画面はユーザー名欄にフォーカスが載っている。
     # ウィンドウを正しくアクティブ化できていれば、クリックは要らない。
     # 既存の入力を消してから打つ
@@ -471,9 +499,7 @@ def perform_login(username: str, password: str, window: Window | None = None,
     press(VK_BACK)
     type_text(password)
 
-    # stay_signed_in=False なら触らない。結果は None (未操作) になる
-    kept = ensure_stay_signed_in(w) if stay_signed_in else None
-
+    # ここから先は余計なキーを挟まない。パスワードの直後は Enter だけ。
     submitted = False
     if submit:
         time.sleep(0.15)
