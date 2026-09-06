@@ -19,6 +19,21 @@ def log_path() -> Path:
     return default_app_dir() / "crash.log"
 
 
+def activity_log_path() -> Path:
+    return default_app_dir() / "activity.log"
+
+
+def log(message: str) -> None:
+    """処理の進み方を残す。固まったときにどこまで来たか分かるようにする。"""
+    try:
+        target = activity_log_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+    except OSError:
+        pass
+
+
 def write_crash(exc_type, exc_value, exc_tb) -> Path | None:
     """未捕捉例外をログに追記する。書けなければ None。"""
     try:

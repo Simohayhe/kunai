@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from . import diagnostics
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
@@ -318,6 +319,13 @@ class AccountService:
                force: bool = False, allow_autologin: bool = True,
                submit_login: bool = True, recapture: bool = True,
                progress: Progress = _noop) -> SwitchResult:
+        # 進捗はログにも残す。固まったときにどこまで来たか分かるように。
+        _ui_progress = progress
+
+        def progress(message: str) -> None:
+            diagnostics.log(f"switch({account.display_name}): {message}")
+            _ui_progress(message)
+
         """指定アカウントに切り替える。
 
         セッションが保存されていればそれを書き戻す (パスワード不要)。

@@ -1,6 +1,8 @@
 """メインウィンドウ。"""
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
@@ -32,6 +34,7 @@ class MainWindow(QMainWindow):
         self.current_id: str | None = None
         self._rank_icons: dict[int, str] = {}
         self._busy = False
+        self._busy_since = 0.0
 
         self.setWindowTitle("VALORANT Account Manager")
         self.resize(1080, 700)
@@ -333,6 +336,7 @@ class MainWindow(QMainWindow):
 
         # 保存済みセッションを最新に保つ。refresh_token はクライアントが
         # 起動するたび更新され、古いコピーはその時点で失効するため。
+        self._check_stuck()
         try:
             if self.service.sync_current_session() is not None:
                 self._update_session_badges()
@@ -370,8 +374,29 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # 操作
     # ==================================================================
+    # 処理がこれ以上かかったら、何かが詰まったとみなして操作を戻す
+    BUSY_LIMIT_SECONDS = 240
+
+    def _check_stuck(self) -> None:
+        """処理中のまま戻ってこない状態から復帰する。
+
+        切り替えは待ち時間の長い処理なので、どこかで詰まるとボタンが
+        押せないままになる。利用者からは「押しても何も起きない」に見えるので、
+        上限を超えたら操作を戻して、何が起きたか伝える。
+        """
+        if not self._busy or not self._busy_since:
+            return
+        if time.time() - self._busy_since < self.BUSY_LIMIT_SECONDS:
+            return
+        diagnostics.log("処理が長すぎるので操作を戻した")
+        self._set_busy(False)
+        self.status.showMessage(
+            "処理が終わらなかったので操作を戻しました。もう一度お試しください。"
+        )
+
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy
+        self._busy_since = time.time() if busy else 0.0
         for b in (self.switch_button, self.refresh_button,
                   self.refresh_all_button, self.import_button):
             b.setEnabled(not busy)
