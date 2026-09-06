@@ -214,7 +214,42 @@ class AccountService:
         self.vault.update(account)
         return account
 
-    def wait_and_capture(self, account: Account, timeout: float = 120.0,
+    def wait_for_login(self, account: Account, timeout: float = 90.0,
+                       progress: Progress = _noop) -> str:
+        """復元したセッションが通るかを見届ける。
+
+        返り値は "ok" / "rejected" / "timeout"。
+
+        成功を待つだけだと、失効していた場合に必ずタイムアウト分だけ
+        待たされる。クライアントはトークンを拒否するとセッションファイルを
+        消すので、それを監視すれば失敗は数十秒で分かる。
+        """
+        if process.mock_mode():
+            return "ok"
+
+        progress(f"{account.display_name}: ログインを確認しています…")
+        deadline = time.time() + timeout
+        gone = 0
+        while time.time() < deadline:
+            client = localapi.LocalClient()
+            if client.available:
+                try:
+                    live = client.session()
+                except localapi.LocalApiError:
+                    live = None
+                if live and live.puuid == account.puuid:
+                    return "ok"
+
+            # 拒否されるとクライアントがセッションファイルを消す。
+            # 書き換え途中の一瞬を拾わないよう、続けて空だったときだけ確定する。
+            gone = gone + 1 if not session.current_session_info().valid else 0
+            if gone >= 3:
+                return "rejected"
+
+            time.sleep(1.5)
+        return "timeout"
+
+    def wait_and_capture(self, account: Account, timeout: float = 90.0,
                          progress: Progress = _noop) -> bool:
         """切り替え後、クライアントがログインし終えてから取り込み直す。
 
@@ -312,8 +347,17 @@ class AccountService:
             # 復元したトークンが Riot 側で失効していることがある。
             # ファイル上は正しく見えるので、実際に通るか試すまで分からない。
             # 通らなければクライアントはセッションを消してログイン画面に戻る。
-            if self.wait_and_capture(account, progress=progress):
+            outcome = self.wait_for_login(account, progress=progress)
+            if outcome == "ok":
+                progress(f"{account.display_name}: ログインを確認しました")
+                self.capture_into(account)
                 recapture = False               # 取り込み済み
+            elif outcome == "timeout":
+                warnings.append(
+                    "ログイン状態を確認できませんでした。"
+                    "Riot Client の画面を確認してください。"
+                )
+                recapture = False
             elif allow_autologin and account.username and account.password:
                 progress("保存セッションが通りませんでした。自動ログインに切り替えます…")
                 warnings.append(
