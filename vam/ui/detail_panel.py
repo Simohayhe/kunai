@@ -167,6 +167,9 @@ class OverviewTab(QWidget):
             ("Riot ID", account.riot_id or "—"),
             ("リージョン", account.region.upper()),
             ("ユーザー名", account.username or "未登録"),
+            # 自動ログインは両方揃っていないと動かない。片方だけだと
+            # 「押しても何も入力されない」ことになるので、一目で分かるようにする
+            ("パスワード", "登録済み" if account.password else "未登録"),
             ("PUUID", account.puuid or "—"),
         ]
         if session_info is not None:

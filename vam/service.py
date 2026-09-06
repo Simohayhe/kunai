@@ -140,6 +140,28 @@ class AccountService:
             "有効にしてください。"
         )
 
+    @staticmethod
+    def _missing_credentials_reason(account: Account, outcome: str) -> str:
+        """自動ログインに回せなかった理由を、何が足りないかまで書く。
+
+        「登録してください」だけだと、片方だけ入っている場合に
+        「登録したのに何も起きない」と見える。
+        """
+        head = ("保存されていたセッションは Riot 側で失効していました。"
+                if outcome == "rejected" else
+                "ログイン状態を確認できませんでした。")
+        if not account.username and not account.password:
+            missing = "ユーザー名とパスワードが未登録です"
+        elif not account.password:
+            missing = "パスワードが未登録です（ユーザー名だけでは自動ログインできません）"
+        elif not account.username:
+            missing = "ユーザー名が未登録です（パスワードだけでは自動ログインできません）"
+        else:
+            missing = "自動ログインが無効です"
+        return (f"{head}\n{missing}。\n"
+                "「···」→「編集」から登録するか、"
+                "このアカウントでログインし直して取り込み直してください。")
+
     def import_current(self, label: str = "", progress: Progress = _noop) -> Account:
         """今ログイン中のアカウントを新規登録する。"""
         info = self.current_session_info()
@@ -362,28 +384,30 @@ class AccountService:
                 progress(f"{account.display_name}: ログインを確認しました")
                 self.capture_into(account)
                 recapture = False               # 取り込み済み
-            elif outcome == "timeout":
-                warnings.append(
-                    "ログイン状態を確認できませんでした。"
-                    "Riot Client の画面を確認してください。"
-                )
-                recapture = False
-            elif allow_autologin and account.username and account.password:
-                account.session_rejected = True
-                self.vault.update(account)
-                progress("保存セッションが通りませんでした。自動ログインに切り替えます…")
-                warnings.append(
-                    "保存されていたセッションは Riot 側で失効していました。"
-                    "登録済みのログイン情報で入り直します。"
-                )
+            elif can_autologin:
+                # rejected でも timeout でも、入り直せるなら入り直す。
+                # timeout は「拒否は見えなかったがログインもできていない」状態で、
+                # 放置すると何も起きないまま終わってしまう。
+                if outcome == "rejected":
+                    account.session_rejected = True
+                    self.vault.update(account)
+                    warnings.append(
+                        "保存されていたセッションは Riot 側で失効していました。"
+                        "登録済みのログイン情報で入り直します。"
+                    )
+                else:
+                    warnings.append(
+                        "ログイン状態を確認できなかったので、"
+                        "登録済みのログイン情報で入り直します。"
+                    )
+                progress("自動ログインに切り替えます…")
                 method = "autologin"
             else:
-                account.session_rejected = True
-                self.vault.update(account)
+                if outcome == "rejected":
+                    account.session_rejected = True
+                    self.vault.update(account)
                 warnings.append(
-                    "保存されていたセッションは Riot 側で失効していました。"
-                    "このアカウントでログインし直して取り込み直すか、"
-                    "ユーザー名とパスワードを登録してください。"
+                    self._missing_credentials_reason(account, outcome)
                 )
 
         if method == "autologin":
