@@ -276,7 +276,7 @@ class AccountService:
             time.sleep(1.5)
         return "timeout"
 
-    def wait_and_capture(self, account: Account, timeout: float = 90.0,
+    def wait_and_capture(self, account: Account, timeout: float = 60.0,
                          progress: Progress = _noop) -> bool:
         """切り替え後、クライアントがログインし終えてから取り込み直す。
 
@@ -420,12 +420,9 @@ class AccountService:
                     window=window, submit=submit_login,
                     stay_signed_in=self.stay_signed_in,
                 )
-                if outcome["stay_signed_in"] is None:
-                    warnings.append(
-                        "「サインイン状態を維持」は設定で無効にしています。"
-                        "セッションが保存されないため、次回もパスワード入力になります。"
-                    )
-                elif outcome["stay_signed_in"] is False:
+                # stay_signed_in=None は「触っていない」という既定の状態。
+                # 毎回警告に出すとノイズにしかならないので黙っておく。
+                if outcome["stay_signed_in"] is False:
                     warnings.append(
                         "「サインイン状態を維持」の状態を判別できませんでした。"
                         "ログイン画面で有効になっているか確認してください。"
