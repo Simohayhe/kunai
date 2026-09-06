@@ -461,6 +461,30 @@ def _rewind_focus(steps: int) -> None:
         time.sleep(0.15)
 
 
+def wait_for_login_form(window: Window, timeout: float = 60.0) -> bool:
+    """ログインフォームが実際に描画されるまで待つ。
+
+    ウィンドウの大きさだけを見ていると、読み込み画面のうちに
+    打ち込んでしまう。キーはどこにも入らず、しかもエラーにならないので
+    「サインインしました」と報告しつつ何も起きていない状態になる。
+
+    「サインイン状態を維持」のチェックボックスがそこに見えているかで
+    判定する。描画前は背景なので None が返る。
+    """
+    deadline = time.time() + timeout
+    ready = 0
+    while time.time() < deadline:
+        if stay_signed_in_state(window) is not None:
+            ready += 1
+            if ready >= 2:          # 描画途中の一瞬を拾わない
+                time.sleep(0.4)
+                return True
+        else:
+            ready = 0
+        time.sleep(0.4)
+    return False
+
+
 def perform_login(username: str, password: str, window: Window | None = None,
                   submit: bool = True, settle: float = 0.5,
                   stay_signed_in: bool = False) -> dict:
@@ -481,6 +505,11 @@ def perform_login(username: str, password: str, window: Window | None = None,
 
     w = window or wait_for_login_window()
     focus(w)
+    if not wait_for_login_form(w):
+        raise AutoLoginError(
+            "ログインフォームが表示されませんでした。"
+            "Riot Client の画面を確認してください。"
+        )
     time.sleep(settle)
 
     # 「サインイン状態を維持」は先に片付ける。既に有効なら画素を 1 点
