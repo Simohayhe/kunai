@@ -4,10 +4,12 @@ Riot Client のログイン画面にキー入力を送り込む。
 Riot が画面構成を変えると壊れる方式なので、あくまで保険。
 通常は session.py のセッション復元を使うこと。
 
-流れは 「サインイン状態を維持」 → ユーザー名 → Tab → パスワード → Enter。
+流れは ユーザー名 → Tab → パスワード → Enter。これだけ。
 すべてキーボードで行う。座標クリックには頼らない。
-チェックボックスを先に片付けるのは、パスワードの直後に Tab を
-挟まないため。処理後は Shift+Tab で入力欄へ戻る。
+
+「サインイン状態を維持」には既定では触らない。Riot 側が前回の状態を
+覚えているので、一度入れておけば維持される。アプリが操作しようとすると
+Tab 走査とフォーカスの巻き戻しが要り、挙動が読みにくくなるため。
 
 実機で確かめた要点:
   - ウィンドウを正しくアクティブ化できていれば、起動直後のログイン画面は
@@ -461,7 +463,7 @@ def _rewind_focus(steps: int) -> None:
 
 def perform_login(username: str, password: str, window: Window | None = None,
                   submit: bool = True, settle: float = 0.5,
-                  stay_signed_in: bool = True) -> dict:
+                  stay_signed_in: bool = False) -> dict:
     """ログイン画面にユーザー名とパスワードを打ち込み、サインインする。
 
     ユーザー名 → Tab → パスワード → (「サインイン状態を維持」) → Enter。

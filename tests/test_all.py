@@ -405,8 +405,10 @@ def test_autologin_geometry() -> None:
     defaults = {name: p.default for name, p
                 in inspect.signature(autologin.perform_login).parameters.items()}
     check("既定でサインインまで行う", defaults["submit"] is True)
-    check("既定で「サインイン状態を維持」を有効にする",
-          defaults["stay_signed_in"] is True)
+    # ログインは ID -> Tab -> パスワード -> Enter だけにする。
+    # チェックボックスに触ると Tab 走査とフォーカスの巻き戻しが要る。
+    check("既定ではチェックボックスに触らない",
+          defaults["stay_signed_in"] is False)
 
     try:
         autologin.perform_login("", "x")
@@ -442,14 +444,14 @@ def test_autologin_geometry() -> None:
     v = _Vault(Path(_tf.mkdtemp()))
     v.initialize()
     svc = AccountService(v)
-    check("既定は有効", svc.stay_signed_in is True)
-    svc.stay_signed_in = False
-    check("無効にできる", svc.stay_signed_in is False)
-    check("設定ファイルに残る",
-          v.settings().get(SETTING_STAY_SIGNED_IN) is False)
-    check("読み直しても保たれる", AccountService(v).stay_signed_in is False)
+    check("既定は触らない", svc.stay_signed_in is False)
     svc.stay_signed_in = True
-    check("戻せる", svc.stay_signed_in is True)
+    check("有効にできる", svc.stay_signed_in is True)
+    check("設定ファイルに残る",
+          v.settings().get(SETTING_STAY_SIGNED_IN) is True)
+    check("読み直しても保たれる", AccountService(v).stay_signed_in is True)
+    svc.stay_signed_in = False
+    check("戻せる", svc.stay_signed_in is False)
 
 
 def test_session_renewal() -> None:

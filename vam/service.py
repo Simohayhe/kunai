@@ -47,14 +47,18 @@ class AccountService:
 
     @property
     def stay_signed_in(self) -> bool:
-        """自動ログイン時に「サインイン状態を維持」を有効にするか。
+        """自動ログイン時に「サインイン状態を維持」をアプリが操作するか。
 
-        既定は有効。無効にすると Riot がセッション cookie を保存しないので、
-        セッションの取り込み・パスワード無しの切り替え・ランクや所持品の
-        取得 (どれも ssid cookie が要る) がすべて使えなくなる。
-        毎回パスワードを打ち込む運用にしたい場合だけ落とすこと。
+        既定は False。ログインは ユーザー名 → Tab → パスワード → Enter だけに
+        する。チェックボックスは Riot 側が前回の状態を覚えているので、
+        一度入れておけば維持される。アプリが操作しようとすると Tab 走査と
+        フォーカスの巻き戻しが要り、挙動が読みにくくなる。
+
+        なお、このチェックが入っていないと Riot はセッションを保存しないため、
+        次回もパスワード入力になる。有効にしたい場合は settings.json に
+        {"stay_signed_in": true} を書く。
         """
-        return bool(self.vault.settings().get(SETTING_STAY_SIGNED_IN, True))
+        return bool(self.vault.settings().get(SETTING_STAY_SIGNED_IN, False))
 
     @stay_signed_in.setter
     def stay_signed_in(self, value: bool) -> None:
