@@ -57,11 +57,23 @@ def is_newer(candidate: str, current: str = __version__) -> bool:
 # --------------------------------------------------------------------------
 # 認証手段さがし
 # --------------------------------------------------------------------------
-def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        args, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        creationflags=_NO_WINDOW, **kwargs,
-    )
+# gh がハングした (実機で確認済み: 稀に応答が返らないことがある) ときに
+# 呼び側を巻き込んで無限に待たされないよう、必ず上限を付ける。
+DEFAULT_TIMEOUT = 20.0
+
+
+def _run(args: list[str], timeout: float = DEFAULT_TIMEOUT,
+         **kwargs) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW, timeout=timeout, **kwargs,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, returncode=1, stdout="",
+            stderr=f"{args[0]} の応答がありませんでした ({timeout:.0f} 秒)",
+        )
 
 
 def gh_ready() -> bool:
@@ -86,22 +98,54 @@ class Release:
     tag: str
     name: str
     notes: str
-    asset_url: str | None  # API 経由のダウンロード URL ("gh" なら gh CLI 経由)
+    asset_url: str | None       # ダウンロード先。種類は asset_kind 次第
+    asset_kind: str = "public"  # "public" (認証不要) / "api" (トークン) / "gh" (gh CLI)
 
 
 class UpdateUnavailable(Exception):
-    """更新の確認手段が無い (Private リポなので認証が要る)。"""
+    """更新の確認手段が無い。"""
 
 
 def check_latest() -> Release:
+    """リポジトリは Public なので、まず認証無しの公開 API を試す。
+
+    これだけで完結すれば gh CLI のサブプロセス呼び出し自体を避けられる。
+    実機で gh が稀に応答を返さないことを確認しているので、これが本命。
+    見えない/失敗したときだけ、トークンや gh CLI にフォールバックする
+    (リポジトリが再び Private になった場合の保険)。
+    """
+    try:
+        return _latest_via_public_api()
+    except requests.RequestException:
+        pass
+
     token = find_token()
     if token:
         return _latest_via_api(token)
     if gh_ready():
         return _latest_via_gh()
     raise UpdateUnavailable(
-        "非公開リポジトリのため、更新の確認には認証が必要です。"
-        " gh CLI でログインするか、環境変数 GITHUB_TOKEN を設定してください。"
+        "リリース情報を取得できませんでした。ネットワーク接続を確認するか、"
+        "gh CLI でログインしてください。"
+    )
+
+
+def _latest_via_public_api() -> Release:
+    resp = requests.get(
+        f"{API_BASE}/releases/latest",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    asset = next(
+        (a for a in data.get("assets", []) if a.get("name") == ASSET_NAME), None
+    )
+    return Release(
+        tag=data.get("tag_name", ""), name=data.get("name", ""),
+        notes=data.get("body", "") or "",
+        asset_url=asset.get("browser_download_url") if asset else None,
+        asset_kind="public",
     )
 
 
@@ -122,7 +166,7 @@ def _latest_via_api(token: str) -> Release:
     )
     return Release(
         tag=data.get("tag_name", ""), name=data.get("name", ""),
-        notes=data.get("body", "") or "", asset_url=asset_url,
+        notes=data.get("body", "") or "", asset_url=asset_url, asset_kind="api",
     )
 
 
@@ -136,7 +180,8 @@ def _latest_via_gh() -> Release:
     has_asset = any(a.get("name") == ASSET_NAME for a in data.get("assets", []))
     return Release(
         tag=data.get("tagName", ""), name=data.get("name", ""),
-        notes=data.get("body", "") or "", asset_url=("gh" if has_asset else None),
+        notes=data.get("body", "") or "",
+        asset_url=("gh" if has_asset else None), asset_kind="gh",
     )
 
 
@@ -152,8 +197,16 @@ def download(release: Release, dest_dir: Path) -> Path:
     target = dest_dir / f"{ASSET_NAME}.new"
     target.unlink(missing_ok=True)
 
-    token = find_token()
-    if token and release.asset_url != "gh":
+    if release.asset_kind == "public":
+        # 認証不要。browser_download_url に余計なヘッダを付けると
+        # 署名付き URL の検証で弾かれることがあるので何も足さない。
+        with requests.get(release.asset_url, timeout=120, stream=True) as resp:
+            resp.raise_for_status()
+            with target.open("wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 16):
+                    f.write(chunk)
+    elif release.asset_kind == "api":
+        token = find_token()
         with requests.get(
             release.asset_url,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/octet-stream"},
@@ -170,7 +223,8 @@ def download(release: Release, dest_dir: Path) -> Path:
         staging.mkdir(parents=True)
         proc = _run(
             ["gh", "release", "download", release.tag, "--repo", REPO,
-             "--pattern", ASSET_NAME, "--dir", str(staging)]
+             "--pattern", ASSET_NAME, "--dir", str(staging)],
+            timeout=180,
         )
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or proc.stdout or "").strip() or "ダウンロードに失敗")
