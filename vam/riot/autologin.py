@@ -301,6 +301,10 @@ def is_active(window: Window) -> bool:
     return user32.GetForegroundWindow() == window.hwnd
 
 
+def is_alive(window: Window) -> bool:
+    return bool(user32.IsWindow(window.hwnd))
+
+
 # ログイン画面のユーザー名欄の位置。ウィンドウ左上からの比率。
 # 実機 (Riot Client v138.0.1、ウィンドウ 1536x864) を実測した値。
 # ログインウィンドウはユーザーがリサイズできない固定サイズなので、
@@ -514,7 +518,7 @@ def ensure_active(window: Window, attempts: int = 3) -> bool:
     return is_active(window)
 
 
-def wait_for_login_form(window: Window, timeout: float = 60.0) -> bool:
+def wait_for_login_form(window: Window, timeout: float = 60.0) -> Window | None:
     """ログインフォームが実際に描画されるまで待つ。
 
     ウィンドウの大きさだけを見ていると、読み込み画面のうちに
@@ -523,24 +527,42 @@ def wait_for_login_form(window: Window, timeout: float = 60.0) -> bool:
 
     「サインイン状態を維持」のチェックボックスがそこに見えているかで
     判定する。描画前は背景なので None が返る。
+
+    実機で確認: 起動直後のスプラッシュ (600x600) の後、さらに一段階
+    中間サイズ (1300x600 など) を経てから最終サイズ (1536x864) になる
+    ことがある。この中間サイズも wait_for_login_window の安定判定を
+    通ってしまうため、そこで受け取ったハンドルが後から作り直されて
+    無効になり、死んだハンドルの画素を読み続けて永遠にタイムアウトする
+    不具合があった。ここでハンドルの生死を毎回確かめ、死んでいたら
+    find_login_window で取り直して続ける。見つかったウィンドウを返す。
     """
     deadline = time.time() + timeout
     ready = 0
+    current = window
     while time.time() < deadline:
+        if not is_alive(current):
+            fresh = find_login_window()
+            if not fresh:
+                ready = 0
+                time.sleep(0.3)
+                continue
+            current = fresh
+            ready = 0
+
         # 前面でないと手前の別ウィンドウの色を読んでしまう。毎回確かめる。
-        if not ensure_active(window, attempts=1):
+        if not ensure_active(current, attempts=1):
             ready = 0
             time.sleep(0.5)
             continue
-        if stay_signed_in_state(window) is not None:
+        if stay_signed_in_state(current) is not None:
             ready += 1
             if ready >= 2:          # 描画途中の一瞬を拾わない
                 time.sleep(0.4)
-                return True
+                return current
         else:
             ready = 0
         time.sleep(0.4)
-    return False
+    return None
 
 
 def perform_login(username: str, password: str, window: Window | None = None,
@@ -563,7 +585,10 @@ def perform_login(username: str, password: str, window: Window | None = None,
 
     w = window or wait_for_login_window()
     focus(w)
-    if not wait_for_login_form(w):
+    # ウィンドウが作り直されてハンドルが無効になっていることがあるので、
+    # ここで見つかった (生きている) ウィンドウを以降すべてに使う。
+    w = wait_for_login_form(w)
+    if w is None:
         raise AutoLoginError(
             "ログインフォームが表示されませんでした。"
             "Riot Client の画面を確認してください。"
