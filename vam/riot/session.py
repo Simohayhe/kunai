@@ -331,7 +331,7 @@ def capture() -> dict[str, bytes]:
     blobs: dict[str, bytes] = {}
     for rel in paths.SESSION_FILE_CANDIDATES:
         f = root / rel
-        if f.is_file():
+        if paths.safe_is_file(f):
             blobs[rel] = f.read_bytes()
     if not blobs:
         raise SessionError(
@@ -362,7 +362,7 @@ def restore(blobs: dict[str, bytes], backup_dir: Path | None = None) -> list[str
     for rel, data in blobs.items():
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        if backup_dir and target.is_file():
+        if backup_dir and paths.safe_is_file(target):
             b = backup_dir / rel.replace("/", "@@")
             b.parent.mkdir(parents=True, exist_ok=True)
             b.write_bytes(target.read_bytes())
@@ -377,7 +377,7 @@ def clear_current() -> list[str]:
     removed = []
     for rel in paths.SESSION_FILE_CANDIDATES:
         f = root / rel
-        if f.is_file():
+        if paths.safe_is_file(f):
             f.unlink()
             removed.append(rel)
     return removed

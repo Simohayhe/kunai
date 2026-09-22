@@ -31,6 +31,22 @@ LOCKFILE_CANDIDATES = (
 )
 
 
+def safe_is_file(path: Path) -> bool:
+    """path.is_file() だが、通常と違う OSError で丸ごと落ちないようにする。
+
+    実機で報告された不具合: ユーザーの環境では Riot Client のデータ置き場
+    (%LOCALAPPDATA%\\Riot Games\\...) の経路上に「信頼されていない
+    マウントポイント」(WinError 448) があり、素の is_file() がそこで
+    未捕捉の OSError を投げてアプリごと落ちていた。Path.is_file() は
+    ENOENT 等ごく一部の OSError しか黙って False にしないため、これは
+    素通りする。ここで広く OSError を捕まえ、判定不能なら「無い」扱いにする。
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def local_appdata() -> Path:
     override = os.environ.get(ENV_OVERRIDE_LOCALAPPDATA)
     if override:
@@ -50,14 +66,14 @@ def valorant_log_dir() -> Path:
 def session_files() -> list[Path]:
     """現在存在するセッション関連ファイルの実パス一覧。"""
     root = riot_client_data_root()
-    return [root / rel for rel in SESSION_FILE_CANDIDATES if (root / rel).is_file()]
+    return [root / rel for rel in SESSION_FILE_CANDIDATES if safe_is_file(root / rel)]
 
 
 def lockfile_path() -> Path | None:
     root = riot_client_data_root()
     for rel in LOCKFILE_CANDIDATES:
         p = root / rel
-        if p.is_file():
+        if safe_is_file(p):
             return p
     return None
 
@@ -76,7 +92,7 @@ def _registry_riot_client_exe() -> Path | None:
                     except FileNotFoundError:
                         continue
                     p = Path(value)
-                    if p.is_file():
+                    if safe_is_file(p):
                         return p
         except OSError:
             continue
@@ -88,11 +104,11 @@ def riot_client_exe() -> Path | None:
     override = os.environ.get(ENV_OVERRIDE_CLIENT_EXE)
     if override:
         p = Path(override)
-        return p if p.is_file() else None
+        return p if safe_is_file(p) else None
 
     # 1) Riot 公式の install マニフェスト
     manifest = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "Riot Games" / "RiotClientInstalls.json"
-    if manifest.is_file():
+    if safe_is_file(manifest):
         import json
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -100,7 +116,7 @@ def riot_client_exe() -> Path | None:
             data = {}
         for key in ("rc_live", "rc_default", "rc_beta"):
             value = data.get(key)
-            if value and Path(value).is_file():
+            if value and safe_is_file(Path(value)):
                 return Path(value)
 
     # 2) レジストリ
@@ -111,7 +127,7 @@ def riot_client_exe() -> Path | None:
     # 3) 既定のインストール先
     for base in (r"C:\Riot Games", os.environ.get("PROGRAMFILES", r"C:\Program Files")):
         p = Path(base) / "Riot Client" / "RiotClientServices.exe"
-        if p.is_file():
+        if safe_is_file(p):
             return p
     return None
 
