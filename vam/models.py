@@ -56,7 +56,8 @@ class Account:
     パスワードなしで切り替えできる。
     """
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    label: str = ""                     # 表示名。ユーザーが自由に付ける
+    label: str = ""                     # 表示名。label_linked が False のときだけ使う
+    label_linked: bool = True           # 表示名を Riot ID に常に合わせるか
     username: str = ""                  # Riot ログイン ID
     password: str = ""                  # 自動入力用。任意
     riot_id: str = ""                   # ゲーム内 ID  Name#TAG
@@ -78,6 +79,8 @@ class Account:
 
     @property
     def display_name(self) -> str:
+        if self.label_linked and self.riot_id:
+            return self.riot_id
         return self.label or self.riot_id or self.username or self.id
 
     @property
@@ -97,5 +100,11 @@ class Account:
         data["rank"] = RankInfo(**(data.get("rank") or {}))
         data["wallet"] = WalletInfo(**(data.get("wallet") or {}))
         data["inventory"] = InventoryInfo(**(data.get("inventory") or {}))
+        if "label_linked" not in data:
+            # label_linked が無い旧データ。既に riot_id と違う表示名を
+            # 手動で付けていたなら、それを尊重して追従させない。
+            label = data.get("label", "")
+            riot_id = data.get("riot_id", "")
+            data["label_linked"] = not label or label == riot_id
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})

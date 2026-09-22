@@ -186,9 +186,20 @@ class AccountDialog(QDialog):
         form.setSpacing(9)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
+        label_row = QHBoxLayout()
         self.label = QLineEdit(self.account.label)
         self.label.setPlaceholderText("メイン / サブ / 弟用 など")
-        form.addRow("表示名", self.label)
+        label_row.addWidget(self.label, 1)
+        self.label_linked = QCheckBox("Riot IDと同じ")
+        self.label_linked.setToolTip(
+            "チェックを入れると、表示名は常に Riot ID と同じになります。"
+            "外すと、この欄で自由に名前を付けられます。"
+        )
+        self.label_linked.setChecked(self.account.label_linked)
+        self.label_linked.toggled.connect(self.label.setDisabled)
+        self.label.setDisabled(self.account.label_linked)
+        label_row.addWidget(self.label_linked)
+        form.addRow("表示名", label_row)
 
         self.riot_id = QLineEdit(self.account.riot_id)
         self.riot_id.setPlaceholderText("Name#TAG")
@@ -286,6 +297,7 @@ class AccountDialog(QDialog):
     def result_account(self) -> Account:
         a = self.account
         a.label = self.label.text().strip()
+        a.label_linked = self.label_linked.isChecked()
         a.riot_id = self.riot_id.text().strip()
         a.region = self.region.currentData()
         a.username = self.username.text().strip()
