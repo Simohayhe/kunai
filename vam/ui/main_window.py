@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from .. import diagnostics, updater
 from ..models import Account
+from ..riot import process as riot_process
 from ..service import AccountService
 from ..storage import Vault
 from ..version import __version__
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         self._busy_since = 0.0
         self._pending_release: updater.Release | None = None
         self._update_check_token: object | None = None
+        self._switch_cancelled = False
 
         self.setWindowTitle("Kunai")
         self.resize(1080, 700)
@@ -243,6 +245,13 @@ class MainWindow(QMainWindow):
         self.switch_button.setObjectName("Primary")
         self.switch_button.clicked.connect(self.switch_selected)
         top.addWidget(self.switch_button)
+
+        self.cancel_switch_button = QPushButton("キャンセル")
+        self.cancel_switch_button.setObjectName("Danger")
+        self.cancel_switch_button.setToolTip("Riot Client を終了して切り替えを中止します")
+        self.cancel_switch_button.clicked.connect(self.cancel_switch)
+        self.cancel_switch_button.setVisible(False)
+        top.addWidget(self.cancel_switch_button)
 
         self.refresh_button = QPushButton("更新")
         self.refresh_button.clicked.connect(self.refresh_selected)
@@ -596,6 +605,8 @@ class MainWindow(QMainWindow):
         for b in (self.switch_button, self.refresh_button,
                   self.refresh_all_button, self.import_button):
             b.setEnabled(not busy)
+        if not busy:
+            self.cancel_switch_button.setVisible(False)
         if message:
             self.status.showMessage(message)
 
@@ -723,7 +734,10 @@ class MainWindow(QMainWindow):
         account = self.vault.get(account_id)
         if not account or self._busy:
             return
+        self._switch_cancelled = False
         self._set_busy(True, f"{account.display_name} に切り替えています…")
+        self.cancel_switch_button.setEnabled(True)
+        self.cancel_switch_button.setVisible(True)
         workers.run(
             self.service.switch, account,
             launch_game=True, force=force,
@@ -732,7 +746,30 @@ class MainWindow(QMainWindow):
             on_progress=self.status.showMessage,
         )
 
+    def cancel_switch(self) -> None:
+        """切り替え処理を中止する。Riot Client を強制終了するだけの単純な中止。
+
+        switch() は複数の待ち処理をまたぐ一続きの関数で、途中から安全に
+        抜けさせるのは難しい。Riot Client を落とせば、待っている処理
+        (ウィンドウ待ち・ログイン確認待ちなど) はどのみち見つからず
+        自然に失敗して戻ってくるので、それを「キャンセルした」結果として扱う。
+        """
+        if not self._busy or self._switch_cancelled:
+            return
+        self._switch_cancelled = True
+        self.cancel_switch_button.setEnabled(False)
+        self.status.showMessage("キャンセルしています…")
+        # stop_all は終了を粘り強く待つため最大 8 秒かかりうる。UI を固めないよう別スレッドで。
+        workers.run(
+            riot_process.stop_all,
+            on_error=lambda m: diagnostics.log(f"キャンセル時の強制終了に失敗: {m}"),
+        )
+
     def _on_switch_failed(self, account_id: str, message: str) -> None:
+        self.cancel_switch_button.setVisible(False)
+        if self._switch_cancelled:
+            self._set_busy(False, "切り替えをキャンセルしました")
+            return
         self._set_busy(False)
         if "起動中" in message:
             answer = QMessageBox.question(
@@ -746,6 +783,7 @@ class MainWindow(QMainWindow):
         self._error("切り替えに失敗しました", message)
 
     def _on_switched(self, result) -> None:
+        self.cancel_switch_button.setVisible(False)
         account = self.vault.get(result.account_id)
         name = account.display_name if account else "アカウント"
         method = "セッション復元" if result.method == "session" else "パスワード自動入力"
