@@ -25,6 +25,7 @@ from .dialogs import AccountDialog, SettingsDialog
 from .icons import IconLoader
 
 STATUS_CHECK_INTERVAL_MS = 120_000
+ACCOUNT_AUTO_REFRESH_INTERVAL_MS = 180_000
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self._pending_release: updater.Release | None = None
         self._update_check_token: object | None = None
         self._switch_cancelled = False
+        self._auto_refreshing = False
 
         self.setWindowTitle("Kunai")
         self.resize(1080, 700)
@@ -64,6 +66,10 @@ class MainWindow(QMainWindow):
         self.check_status()
 
         self.check_for_update()
+
+        self._account_refresh_timer = QTimer(self)
+        self._account_refresh_timer.timeout.connect(self.auto_refresh_current_account)
+        self._account_refresh_timer.start(ACCOUNT_AUTO_REFRESH_INTERVAL_MS)
 
     # ==================================================================
     # 組み立て
@@ -812,6 +818,34 @@ class MainWindow(QMainWindow):
         if self.selected_id == account.id:
             self.select_account(account.id)
 
+    def auto_refresh_current_account(self) -> None:
+        """ソフト起動中、今ログイン中のアカウントのランク・ウォレットを
+        黙って追従させる。手動更新と違い、忙しい間は割り込まず、
+        失敗してもエラーダイアログは出さない (プレイ中の邪魔をしないため)。
+        """
+        if self._busy or self._auto_refreshing or not self.current_id:
+            return
+        account = self.vault.get(self.current_id)
+        if not account:
+            return
+        self._auto_refreshing = True
+        workers.run(
+            self.service.refresh, account, fetch_inventory=False,
+            on_done=self._on_auto_refreshed,
+            on_error=self._on_auto_refresh_failed,
+        )
+
+    def _on_auto_refreshed(self, account: Account) -> None:
+        self._auto_refreshing = False
+        self.reload_accounts()
+        if self.selected_id == account.id:
+            self.select_account(account.id)
+            self.load_history()
+
+    def _on_auto_refresh_failed(self, message: str) -> None:
+        self._auto_refreshing = False
+        diagnostics.log(f"自動更新に失敗: {message}")
+
     def refresh_all(self) -> None:
         accounts = [a for a in self.vault.accounts() if a.session_saved]
         if not accounts:
@@ -949,6 +983,7 @@ class MainWindow(QMainWindow):
         # 走行中のバックグラウンド処理が終わってから閉じる
         self._env_timer.stop()
         self._status_timer.stop()
+        self._account_refresh_timer.stop()
         workers.wait_for_all(3000)
         super().closeEvent(event)
 
