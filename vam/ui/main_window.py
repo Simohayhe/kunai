@@ -20,7 +20,7 @@ from ..version import __version__
 from . import theme, workers
 from .account_card import AccountCard
 from .detail_panel import DetailPanel
-from .dialogs import AccountDialog, StatusSettingsDialog
+from .dialogs import AccountDialog, SettingsDialog
 from .icons import IconLoader
 
 STATUS_CHECK_INTERVAL_MS = 120_000
@@ -41,6 +41,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._busy_since = 0.0
         self._pending_release: updater.Release | None = None
+        self._update_check_token: object | None = None
 
         self.setWindowTitle("VALORANT Account Manager")
         self.resize(1080, 700)
@@ -140,11 +141,11 @@ class MainWindow(QMainWindow):
         self.refresh_all_button.clicked.connect(self.refresh_all)
         layout.addWidget(self.refresh_all_button)
 
-        self.status_settings_button = QPushButton("通知設定")
-        self.status_settings_button.setObjectName("Ghost")
-        self.status_settings_button.setToolTip("メンテナンス・障害の通知先を設定")
-        self.status_settings_button.clicked.connect(self.open_status_settings)
-        layout.addWidget(self.status_settings_button)
+        self.settings_button = QPushButton("設定")
+        self.settings_button.setObjectName("Ghost")
+        self.settings_button.setToolTip("通知・ログイン・更新の設定")
+        self.settings_button.clicked.connect(self.open_settings)
+        layout.addWidget(self.settings_button)
 
         self.diag_button = QPushButton("?")
         self.diag_button.setObjectName("Ghost")
@@ -432,29 +433,93 @@ class MainWindow(QMainWindow):
         self.status_banner_label.setText(summary)
         self.status_banner.setVisible(active)
 
-    def open_status_settings(self) -> None:
-        dialog = StatusSettingsDialog(self.service.discord_webhook_url, parent=self)
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(
+            webhook_url=self.service.discord_webhook_url,
+            step_delay=self.service.login_step_delay,
+            current_version=__version__,
+            parent=self,
+        )
+        dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
+        dialog.update_button.clicked.connect(lambda: self._start_update(dialog))
+        if self._pending_release:
+            dialog.set_update_available(self._pending_release.tag)
         if dialog.exec():
             self.service.discord_webhook_url = dialog.webhook_url()
-            self.status.showMessage("通知設定を保存しました", 4000)
+            self.service.login_step_delay = dialog.step_delay()
+            self.status.showMessage("設定を保存しました", 4000)
 
     # ==================================================================
     # 自動更新
     # ==================================================================
+    UPDATE_CHECK_TIMEOUT_MS = 25_000
+
     def check_for_update(self) -> None:
         """起動時にそっと確認する。失敗しても黙っている (毎回警告を出さない)。"""
+        self._run_update_check(dialog=None)
+
+    def _run_update_check(self, dialog: SettingsDialog | None) -> None:
+        if dialog:
+            dialog.set_checking()
+
+        # gh CLI が稀に応答を返さないことがある (実機で確認済み)。
+        # updater 側にもタイムアウトは入れてあるが、万一それをすり抜けても
+        # 設定画面が「確認中…」のまま固まって見えることがないよう、
+        # ここでも一定時間で諦めて UI を戻す。
+        token = object()
+        self._update_check_token = token
         workers.run(
             updater.check_latest,
-            on_done=self._on_update_checked,
-            on_error=lambda m: diagnostics.log(f"更新確認に失敗/確認手段なし: {m}"),
+            on_done=lambda release: self._on_update_checked(release, dialog, token),
+            on_error=lambda m: self._on_update_check_failed(m, dialog, token),
+        )
+        QTimer.singleShot(
+            self.UPDATE_CHECK_TIMEOUT_MS,
+            lambda: self._on_update_check_timeout(dialog, token),
         )
 
-    def _on_update_checked(self, release: updater.Release) -> None:
+    def _on_update_checked(self, release: updater.Release,
+                           dialog: SettingsDialog | None, token: object) -> None:
+        if self._update_check_token is not token:
+            return  # タイムアウトで既に諦めた後の遅れて来た結果
+        self._update_check_token = None
         if not updater.is_newer(release.tag):
+            self._pending_release = None
+            self.update_button.setVisible(False)
+            if dialog:
+                dialog.set_up_to_date()
             return
         self._pending_release = release
         self.update_button.setText(f"更新: {release.tag}")
         self.update_button.setVisible(True)
+        if dialog:
+            dialog.set_update_available(release.tag)
+
+    def _on_update_check_timeout(self, dialog: SettingsDialog | None, token: object) -> None:
+        if self._update_check_token is not token:
+            return  # 既に結果が来ている
+        self._update_check_token = None
+        diagnostics.log("更新確認がタイムアウトしました")
+        if dialog:
+            try:
+                dialog.set_check_failed(
+                    "確認がタイムアウトしました。ネットワークや gh CLI の状態を確認してください。"
+                )
+            except RuntimeError:
+                pass  # ダイアログが既に閉じられている
+
+    def _on_update_check_failed(self, message: str, dialog: SettingsDialog | None,
+                                token: object) -> None:
+        if self._update_check_token is not token:
+            return  # タイムアウトで既に諦めた後の遅れて来た結果
+        self._update_check_token = None
+        diagnostics.log(f"更新確認に失敗/確認手段なし: {message}")
+        if dialog:
+            dialog.set_check_failed(message)
+
+    def _start_update(self, dialog: SettingsDialog) -> None:
+        dialog.close()
+        self.on_update()
 
     def on_update(self) -> None:
         release = self._pending_release

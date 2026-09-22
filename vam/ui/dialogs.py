@@ -4,8 +4,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QTextEdit,
+    QVBoxLayout,
 )
 
 from ..crypto import VaultLocked
@@ -295,38 +296,98 @@ class AccountDialog(QDialog):
         return a
 
 
-class StatusSettingsDialog(QDialog):
-    """VALORANT のメンテナンス・障害通知先 (Discord Webhook) の設定。"""
+class SettingsDialog(QDialog):
+    """通知・ログイン・更新をまとめた設定画面。
 
-    def __init__(self, webhook_url: str, parent=None):
+    更新の確認/適用そのものは MainWindow が持つ (バックグラウンド実行や
+    終了処理が絡むため)。このダイアログはボタンと表示だけを持ち、
+    MainWindow がそれらに配線する。
+    """
+
+    def __init__(self, webhook_url: str, step_delay: float, current_version: str,
+                parent=None):
         super().__init__(parent)
-        self.setWindowTitle("ステータス通知の設定")
+        self.setWindowTitle("設定")
         self.setMinimumWidth(460)
         self.setStyleSheet(theme.STYLESHEET)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(13)
+        layout.setSpacing(16)
         layout.setContentsMargins(22, 20, 22, 20)
 
-        title = QLabel("メンテナンス・障害通知")
+        title = QLabel("設定")
         title.setObjectName("Title")
         layout.addWidget(title)
 
-        desc = QLabel(
-            "VALORANT のメンテナンス・障害情報を定期的に確認し、"
-            "開始/終了したときに Discord へ通知します。"
-            "空欄にすると、アプリ内の表示だけになり通知は行いません。"
-        )
-        desc.setObjectName("SubTitle")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
+        # -- 通知 -----------------------------------------------------
+        notify_title = QLabel("メンテナンス・障害通知")
+        notify_title.setObjectName("SectionTitle")
+        layout.addWidget(notify_title)
 
-        form = QFormLayout()
-        form.setSpacing(9)
+        notify_desc = QLabel(
+            "VALORANT のメンテナンス・障害情報を定期的に確認し、開始/終了"
+            "したときに Discord へ通知します。空欄にすると、アプリ内の"
+            "表示だけになり通知は行いません。"
+        )
+        notify_desc.setObjectName("SubTitle")
+        notify_desc.setWordWrap(True)
+        layout.addWidget(notify_desc)
+
+        notify_form = QFormLayout()
+        notify_form.setSpacing(9)
         self.webhook = QLineEdit(webhook_url)
         self.webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
-        form.addRow("Webhook URL", self.webhook)
-        layout.addLayout(form)
+        notify_form.addRow("Webhook URL", self.webhook)
+        layout.addLayout(notify_form)
+
+        # -- ログイン ---------------------------------------------------
+        login_title = QLabel("自動ログインの待機時間")
+        login_title.setObjectName("SectionTitle")
+        layout.addWidget(login_title)
+
+        login_desc = QLabel(
+            "ログイン画面が表示されてから入力を始めるまでの待機秒数です。"
+            "短くすると速くなりますが、短すぎると画面の描画が間に合わず"
+            "入力を取りこぼすことがあります。"
+        )
+        login_desc.setObjectName("SubTitle")
+        login_desc.setWordWrap(True)
+        layout.addWidget(login_desc)
+
+        login_form = QFormLayout()
+        login_form.setSpacing(9)
+        self.delay = QDoubleSpinBox()
+        self.delay.setDecimals(1)
+        self.delay.setRange(0.1, 5.0)
+        self.delay.setSingleStep(0.1)
+        self.delay.setSuffix(" 秒")
+        self.delay.setValue(step_delay)
+        login_form.addRow("待機時間", self.delay)
+        layout.addLayout(login_form)
+
+        # -- 更新 ---------------------------------------------------
+        update_title = QLabel("ソフトの更新")
+        update_title.setObjectName("SectionTitle")
+        layout.addWidget(update_title)
+
+        update_row = QHBoxLayout()
+        update_row.setSpacing(9)
+        self.version_label = QLabel(f"現在のバージョン: v{current_version}")
+        self.version_label.setObjectName("SubTitle")
+        update_row.addWidget(self.version_label, 1)
+        self.check_button = QPushButton("今すぐ確認")
+        update_row.addWidget(self.check_button)
+        layout.addLayout(update_row)
+
+        self.update_status = QLabel()
+        self.update_status.setObjectName("SubTitle")
+        self.update_status.setWordWrap(True)
+        layout.addWidget(self.update_status)
+
+        self.update_button = QPushButton()
+        self.update_button.setObjectName("Primary")
+        self.update_button.setVisible(False)
+        layout.addWidget(self.update_button)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
@@ -338,3 +399,31 @@ class StatusSettingsDialog(QDialog):
 
     def webhook_url(self) -> str:
         return self.webhook.text().strip()
+
+    def step_delay(self) -> float:
+        return self.delay.value()
+
+    # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
+    def set_checking(self) -> None:
+        self.check_button.setEnabled(False)
+        self.check_button.setText("確認中…")
+        self.update_status.setText("")
+
+    def set_up_to_date(self) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText("最新の状態です。")
+        self.update_button.setVisible(False)
+
+    def set_check_failed(self, message: str) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText(message)
+        self.update_button.setVisible(False)
+
+    def set_update_available(self, tag: str) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText(f"{tag} が利用できます。")
+        self.update_button.setText(f"{tag} に更新")
+        self.update_button.setVisible(True)

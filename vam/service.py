@@ -40,6 +40,9 @@ class SwitchResult:
 # 設定キー。settings.json に平文で置く (機密ではない)
 SETTING_STAY_SIGNED_IN = "stay_signed_in"
 SETTING_DISCORD_WEBHOOK = "discord_webhook_url"
+SETTING_LOGIN_STEP_DELAY = "login_step_delay"
+DEFAULT_LOGIN_STEP_DELAY = 0.5
+MIN_LOGIN_STEP_DELAY = 0.1
 
 
 class AccountService:
@@ -76,6 +79,25 @@ class AccountService:
     def discord_webhook_url(self, value: str) -> None:
         settings = self.vault.settings()
         settings[SETTING_DISCORD_WEBHOOK] = value.strip()
+        self.vault.save_settings(settings)
+
+    @property
+    def login_step_delay(self) -> float:
+        """自動ログインで、フォームが出てから入力を始めるまでの待機秒数。
+
+        短すぎると Electron 側の描画が間に合わず入力を取りこぼす
+        (実機で確認済み)。下限は 0.1 秒。
+        """
+        value = self.vault.settings().get(SETTING_LOGIN_STEP_DELAY, DEFAULT_LOGIN_STEP_DELAY)
+        try:
+            return max(MIN_LOGIN_STEP_DELAY, float(value))
+        except (TypeError, ValueError):
+            return DEFAULT_LOGIN_STEP_DELAY
+
+    @login_step_delay.setter
+    def login_step_delay(self, value: float) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_LOGIN_STEP_DELAY] = max(MIN_LOGIN_STEP_DELAY, float(value))
         self.vault.save_settings(settings)
 
     # -- VALORANT のメンテナンス・障害ステータス ----------------------------
@@ -462,6 +484,7 @@ class AccountService:
                     account.username, account.password,
                     window=window, submit=submit_login,
                     stay_signed_in=self.stay_signed_in,
+                    settle=self.login_step_delay,
                 )
                 # stay_signed_in=None は「触っていない」という既定の状態。
                 # 毎回警告に出すとノイズにしかならないので黙っておく。
