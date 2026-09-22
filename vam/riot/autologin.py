@@ -310,6 +310,10 @@ USERNAME_FIELD = (0.130, 0.310)
 # これを有効にしないと riot-login.persist が null のままで、
 # セッションが保存されず切り替えに使えない。ログインより大事。
 STAY_SIGNED_IN = (0.0417, 0.5023)
+# パスワード欄の上辺。フォーカス確認だけに使うので 1 点で足りる。
+# 実機 (v139.0.8) 実測: 未フォーカス時は枠が見えず地の灰色 (239,239,239) と
+# 一体化しているが、フォーカスを受けると濃い枠線 (31,31,31 前後) が出る。
+PASSWORD_FIELD_TOP = (0.20, 0.350)
 
 
 def map_fraction(left: int, top: int, width: int, height: int,
@@ -368,6 +372,37 @@ def is_checkbox_checked(rgb: tuple[int, int, int]) -> bool | None:
             return None                   # ほぼ白 = 背景
         return False                      # 無彩色 = 未チェック
     return None                           # 赤以外の有彩色 = 別の部品
+
+
+def password_field_focused(window: Window) -> bool:
+    """パスワード欄が実際にキーボードフォーカスを持っているか。
+
+    Tab を送った直後は、Electron 側がまだフォーカス移動を処理しきっておらず、
+    見た目のフォーカスリングが出る前に文字を打ち込んでしまうと、パスワードが
+    どこにも入らないまま Enter だけが送られることがある (実機で再現)。
+    固定の sleep で「たぶん大丈夫だろう」と決め打つのではなく、実際に枠線の
+    色が変わったこと (未フォーカス時は地の灰色と同化、フォーカス時は濃い枠線
+    が出る) を見てから入力する。
+    """
+    left, top, width, height = window_rect(window)
+    if width < LOADED_MIN_WIDTH:
+        return False
+    r, g, b = get_pixel(*map_fraction(left, top, width, height, PASSWORD_FIELD_TOP))
+    return (r + g + b) < 150
+
+
+def wait_for_password_focus(window: Window, timeout: float = 2.0) -> bool:
+    """Tab 移動後、パスワード欄にフォーカスが乗るまで待つ。
+
+    乗らないまま timeout に達しても、呼び側は入力自体は試みる
+    (この関数の失敗だけでログインを諦めるほどではないため)。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if password_field_focused(window):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def stay_signed_in_state(window: Window) -> bool | None:
@@ -553,7 +588,10 @@ def perform_login(username: str, password: str, window: Window | None = None,
     type_text(username)
 
     press(VK_TAB)
-    time.sleep(0.08)
+    # 固定 sleep だけに頼ると、Electron 側のフォーカス移動が間に合わず
+    # パスワードがどこにも入らないまま Enter だけ送られることがある
+    # (実機で再現済み)。実際にフォーカスが乗るのを見てから進む。
+    wait_for_password_focus(w)
 
     # パスワードは特に慎重に。ここで前面を失っていたら打たずに止める。
     if not ensure_active(w):
