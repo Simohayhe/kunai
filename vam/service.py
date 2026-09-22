@@ -12,7 +12,7 @@ from . import diagnostics
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
-from .riot import api, auth, autologin, content, launcher, localapi, process, session
+from .riot import api, auth, autologin, content, launcher, localapi, process, session, status
 
 Progress = Callable[[str], None]
 
@@ -39,6 +39,7 @@ class SwitchResult:
 
 # 設定キー。settings.json に平文で置く (機密ではない)
 SETTING_STAY_SIGNED_IN = "stay_signed_in"
+SETTING_DISCORD_WEBHOOK = "discord_webhook_url"
 
 
 class AccountService:
@@ -66,6 +67,40 @@ class AccountService:
         settings = self.vault.settings()
         settings[SETTING_STAY_SIGNED_IN] = bool(value)
         self.vault.save_settings(settings)
+
+    @property
+    def discord_webhook_url(self) -> str:
+        return str(self.vault.settings().get(SETTING_DISCORD_WEBHOOK, ""))
+
+    @discord_webhook_url.setter
+    def discord_webhook_url(self, value: str) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_DISCORD_WEBHOOK] = value.strip()
+        self.vault.save_settings(settings)
+
+    # -- VALORANT のメンテナンス・障害ステータス ----------------------------
+    def check_status(self, progress: Progress = _noop) -> tuple[bool, str]:
+        """状態を取得し、前回との差分を Discord に通知する。
+
+        返り値は (アクティブな案件があるか, バナー用の要約文)。
+        初回実行時は「今すでに起きていること」を通知しない
+        (起動のたびに既知の案件をスパム通知しないため)。
+        """
+        state_path = self.vault.app_dir / "status_state.json"
+        previous = status.load_snapshot(state_path)
+        current = status.fetch()
+
+        if previous is not None:
+            webhook = self.discord_webhook_url
+            for event in status.diff(previous, current):
+                if webhook:
+                    try:
+                        status.notify_discord(webhook, event)
+                    except status.StatusError as exc:
+                        progress(str(exc))
+
+        status.save_snapshot(state_path, current)
+        return current.active, status.summarize(current)
 
     # -- 環境 ---------------------------------------------------------------
     def environment(self) -> paths.Environment:

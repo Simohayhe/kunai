@@ -293,3 +293,48 @@ class AccountDialog(QDialog):
         a.color = self._color
         a.favorite = self.favorite.isChecked()
         return a
+
+
+class StatusSettingsDialog(QDialog):
+    """VALORANT のメンテナンス・障害通知先 (Discord Webhook) の設定。"""
+
+    def __init__(self, webhook_url: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ステータス通知の設定")
+        self.setMinimumWidth(460)
+        self.setStyleSheet(theme.STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(13)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        title = QLabel("メンテナンス・障害通知")
+        title.setObjectName("Title")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "VALORANT のメンテナンス・障害情報を定期的に確認し、"
+            "開始/終了したときに Discord へ通知します。"
+            "空欄にすると、アプリ内の表示だけになり通知は行いません。"
+        )
+        desc.setObjectName("SubTitle")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setSpacing(9)
+        self.webhook = QLineEdit(webhook_url)
+        self.webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
+        form.addRow("Webhook URL", self.webhook)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
+        buttons.button(QDialogButtonBox.Ok).setText("保存")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def webhook_url(self) -> str:
+        return self.webhook.text().strip()

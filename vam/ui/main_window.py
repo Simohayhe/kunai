@@ -1,7 +1,9 @@
 """メインウィンドウ。"""
 from __future__ import annotations
 
+import sys
 import time
+import webbrowser
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
@@ -10,15 +12,18 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
-from .. import diagnostics
+from .. import diagnostics, updater
 from ..models import Account
 from ..service import AccountService
 from ..storage import Vault
+from ..version import __version__
 from . import theme, workers
 from .account_card import AccountCard
 from .detail_panel import DetailPanel
-from .dialogs import AccountDialog
+from .dialogs import AccountDialog, StatusSettingsDialog
 from .icons import IconLoader
+
+STATUS_CHECK_INTERVAL_MS = 120_000
 
 
 class MainWindow(QMainWindow):
@@ -35,6 +40,7 @@ class MainWindow(QMainWindow):
         self._rank_icons: dict[int, str] = {}
         self._busy = False
         self._busy_since = 0.0
+        self._pending_release: updater.Release | None = None
 
         self.setWindowTitle("VALORANT Account Manager")
         self.resize(1080, 700)
@@ -49,6 +55,13 @@ class MainWindow(QMainWindow):
         self._env_timer.timeout.connect(self.refresh_environment)
         self._env_timer.start(5000)
 
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self.check_status)
+        self._status_timer.start(STATUS_CHECK_INTERVAL_MS)
+        self.check_status()
+
+        self.check_for_update()
+
     # ==================================================================
     # 組み立て
     # ==================================================================
@@ -60,6 +73,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         layout.addWidget(self._build_header())
+        layout.addWidget(self._build_status_banner())
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
@@ -111,10 +125,26 @@ class MainWindow(QMainWindow):
         self.env_label.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:12px; border:none;")
         layout.addWidget(self.env_label)
 
+        version_label = QLabel(f"v{__version__}")
+        version_label.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px; border:none;")
+        layout.addWidget(version_label)
+
+        self.update_button = QPushButton()
+        self.update_button.setObjectName("Ghost")
+        self.update_button.clicked.connect(self.on_update)
+        self.update_button.setVisible(False)
+        layout.addWidget(self.update_button)
+
         self.refresh_all_button = QPushButton("すべて更新")
         self.refresh_all_button.setObjectName("Ghost")
         self.refresh_all_button.clicked.connect(self.refresh_all)
         layout.addWidget(self.refresh_all_button)
+
+        self.status_settings_button = QPushButton("通知設定")
+        self.status_settings_button.setObjectName("Ghost")
+        self.status_settings_button.setToolTip("メンテナンス・障害の通知先を設定")
+        self.status_settings_button.clicked.connect(self.open_status_settings)
+        layout.addWidget(self.status_settings_button)
 
         self.diag_button = QPushButton("?")
         self.diag_button.setObjectName("Ghost")
@@ -123,6 +153,22 @@ class MainWindow(QMainWindow):
         self.diag_button.clicked.connect(self.show_diagnostics)
         layout.addWidget(self.diag_button)
         return header
+
+    def _build_status_banner(self) -> QWidget:
+        self.status_banner = QFrame()
+        self.status_banner.setStyleSheet(
+            f"QFrame {{ background:{theme.WARN}; }}"
+        )
+        layout = QHBoxLayout(self.status_banner)
+        layout.setContentsMargins(18, 7, 18, 7)
+        self.status_banner_label = QLabel()
+        self.status_banner_label.setStyleSheet(
+            "color:#1a1408; font-size:12px; font-weight:700; border:none;"
+        )
+        self.status_banner_label.setWordWrap(True)
+        layout.addWidget(self.status_banner_label, 1)
+        self.status_banner.setVisible(False)
+        return self.status_banner
 
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
@@ -370,6 +416,91 @@ class MainWindow(QMainWindow):
         self.env_label.setText("   ·   ".join(bits))
         color = theme.OK if env.installed else theme.WARN
         self.env_label.setStyleSheet(f"color:{color}; font-size:12px; border:none;")
+
+    # ==================================================================
+    # VALORANT のステータス (メンテナンス・障害)
+    # ==================================================================
+    def check_status(self) -> None:
+        workers.run(
+            self.service.check_status,
+            on_done=self._on_status_checked,
+            on_error=lambda m: diagnostics.log(f"ステータス確認に失敗: {m}"),
+        )
+
+    def _on_status_checked(self, result: tuple[bool, str]) -> None:
+        active, summary = result
+        self.status_banner_label.setText(summary)
+        self.status_banner.setVisible(active)
+
+    def open_status_settings(self) -> None:
+        dialog = StatusSettingsDialog(self.service.discord_webhook_url, parent=self)
+        if dialog.exec():
+            self.service.discord_webhook_url = dialog.webhook_url()
+            self.status.showMessage("通知設定を保存しました", 4000)
+
+    # ==================================================================
+    # 自動更新
+    # ==================================================================
+    def check_for_update(self) -> None:
+        """起動時にそっと確認する。失敗しても黙っている (毎回警告を出さない)。"""
+        workers.run(
+            updater.check_latest,
+            on_done=self._on_update_checked,
+            on_error=lambda m: diagnostics.log(f"更新確認に失敗/確認手段なし: {m}"),
+        )
+
+    def _on_update_checked(self, release: updater.Release) -> None:
+        if not updater.is_newer(release.tag):
+            return
+        self._pending_release = release
+        self.update_button.setText(f"更新: {release.tag}")
+        self.update_button.setVisible(True)
+
+    def on_update(self) -> None:
+        release = self._pending_release
+        if not release:
+            return
+
+        if not getattr(sys, "frozen", False):
+            # ソースから動かしているときは入れ替えようがないので、リリースページを見てもらう
+            webbrowser.open(updater.RELEASES_URL)
+            return
+
+        answer = QMessageBox.question(
+            self, "更新",
+            f"{release.tag} に更新します。\n"
+            "ダウンロードのあと、この画面はいったん閉じて起動し直します。\n"
+            "続けますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.update_button.setEnabled(False)
+        self.update_button.setText("更新中…")
+        self.status.showMessage("新しいバージョンをダウンロードしています…")
+        workers.run(
+            self._download_and_apply_update, release,
+            on_done=self._on_update_downloaded,
+            on_error=self._on_update_failed,
+        )
+
+    def _download_and_apply_update(self, release: updater.Release) -> None:
+        path = updater.download(release, self.vault.app_dir / "update")
+        updater.apply_update(path)
+
+    def _on_update_downloaded(self, _result) -> None:
+        self.status.showMessage("入れ替えのため終了します…")
+        # 入れ替え役が動き出したので、掴んでいる exe を手放すために終了する
+        QTimer.singleShot(600, self.close)
+
+    def _on_update_failed(self, message: str) -> None:
+        release = self._pending_release
+        self.update_button.setEnabled(True)
+        if release:
+            self.update_button.setText(f"更新: {release.tag}")
+        self.status.showMessage("")
+        QMessageBox.warning(self, "更新できませんでした", message)
 
     # ==================================================================
     # 操作
@@ -714,6 +845,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # 走行中のバックグラウンド処理が終わってから閉じる
         self._env_timer.stop()
+        self._status_timer.stop()
         workers.wait_for_all(3000)
         super().closeEvent(event)
 
