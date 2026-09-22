@@ -840,7 +840,7 @@ def test_ui() -> None:
 
 
 def main() -> int:
-    print("VALORANT Account Manager — 通しテスト")
+    print("Kunai — 通しテスト")
     for fn in (test_crypto, test_storage, test_session, test_localapi,
                test_service, test_real_file_format, test_process_isolation,
                test_autologin_geometry,

@@ -1,15 +1,15 @@
-; VALORANT Account Manager のインストーラー定義。
-; 単体では叩かない。tools/build_installer.py が dist\ValorantAccountManager.exe
+; Kunai のインストーラー定義。
+; 単体では叩かない。tools/build_installer.py が dist\Kunai.exe
 ; を確認した上で、バージョンを /DMyAppVersion=x.y.z として渡して ISCC を呼ぶ。
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
 
-#define MyAppName "VALORANT Account Manager"
+#define MyAppName "Kunai"
 #define MyAppPublisher "Simohaya"
-#define MyAppExeName "ValorantAccountManager.exe"
-#define MyAppURL "https://github.com/Simohayhe/valorant-account-manager"
+#define MyAppExeName "Kunai.exe"
+#define MyAppURL "https://github.com/Simohayhe/kunai"
 
 [Setup]
 AppId={{528FAFEE-97A8-40E7-8A4C-3467F42BF689}
@@ -24,10 +24,11 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist
-OutputBaseFilename=ValorantAccountManagerSetup
+OutputBaseFilename=KunaiSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 管理者権限なしでも入れられるようにしつつ、要る場合は選べるようにする
 PrivilegesRequired=lowest

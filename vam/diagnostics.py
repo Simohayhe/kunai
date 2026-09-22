@@ -59,7 +59,7 @@ def environment_report() -> str:
         running = f"取得失敗: {exc}"
 
     lines = [
-        f"アプリ            : VALORANT Account Manager {version()}",
+        f"アプリ            : Kunai {version()}",
         f"実行形態          : {'exe (PyInstaller)' if frozen() else 'ソース'}",
         f"Python            : {platform.python_version()}",
         f"OS                : {platform.platform()}",
@@ -84,7 +84,8 @@ def frozen() -> bool:
 
 
 def version() -> str:
-    return "0.2.0"
+    from .version import __version__
+    return __version__
 
 
 def install_excepthook(on_crash=None) -> None:

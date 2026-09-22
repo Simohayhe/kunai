@@ -1,4 +1,4 @@
-# VALORANT Account Manager
+# Kunai
 
 複数の VALORANT アカウントを、パスワードを打ち直さずに切り替えるための Windows デスクトップアプリ。
 ランク・ウォレット・所持スキンも、アカウントを切り替えずにまとめて確認できる。
@@ -37,8 +37,8 @@
 
 ### exe を使う（Python 不要）
 
-[Releases](../../releases) から `ValorantAccountManager.exe` を落として実行するだけ。
-インストール不要。設定と保管庫は `%LOCALAPPDATA%\ValorantAccountManager` に作られる。
+[Releases](../../releases) から `Kunai.exe`（ポータブル版）か `KunaiSetup.exe`（インストーラー版）を落として実行するだけ。
+設定と保管庫は `%LOCALAPPDATA%\Kunai` に作られる。
 
 ### ソースから動かす
 
@@ -100,7 +100,7 @@ python main.py
 - パスワード無しの切り替え
 - ランク・戦績・ウォレット・所持スキンの取得 (どれも ssid cookie が要る)
 
-切りたい場合は `%LOCALAPPDATA%\ValorantAccountManager\settings.json` に:
+切りたい場合は `%LOCALAPPDATA%\Kunai\settings.json` に:
 
 ```json
 { "stay_signed_in": false }
@@ -195,7 +195,7 @@ VALORANT が入っていなくても全項目が走る。`vam/mock/fake_riot.py`
 ヘッダ右の **「?」ボタン** で診断情報が出る。Riot Client の検出結果、セッションファイルの
 有無、起動中プロセスなどが並ぶので、そのままコピーして報告に使える。
 
-予期しないエラーで落ちた場合は `%LOCALAPPDATA%\ValorantAccountManager\crash.log` に
+予期しないエラーで落ちた場合は `%LOCALAPPDATA%\Kunai\crash.log` に
 スタックトレースが残る。
 
 よくある詰まりどころ:

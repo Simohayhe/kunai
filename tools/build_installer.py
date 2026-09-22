@@ -2,7 +2,7 @@
 
     python tools/build_installer.py
 
-先に単体 exe (dist/ValorantAccountManager.exe) を build_exe.py でビルドし、
+先に単体 exe (dist/Kunai.exe) を build_exe.py でビルドし、
 それを installer/setup.iss (Inno Setup) でラップする。Inno Setup 本体が
 要る (winget install JRSoftware.InnoSetup で入る)。
 """
@@ -41,7 +41,7 @@ def build() -> Path:
     from vam.version import __version__
     from build_exe import build as build_exe
 
-    exe = ROOT / "dist" / "ValorantAccountManager.exe"
+    exe = ROOT / "dist" / "Kunai.exe"
     if not exe.is_file():
         print("先に単体 exe をビルドします…")
         build_exe()
@@ -53,7 +53,7 @@ def build() -> Path:
         check=True, cwd=ROOT,
     )
 
-    installer = ROOT / "dist" / "ValorantAccountManagerSetup.exe"
+    installer = ROOT / "dist" / "KunaiSetup.exe"
     if not installer.is_file():
         raise SystemExit("インストーラーが生成されませんでした")
     print(f"\n完成: {installer}  ({installer.stat().st_size / 1024 / 1024:.1f} MB)")

@@ -14,7 +14,17 @@ def default_app_dir() -> Path:
     base = os.environ.get("VAM_APP_DIR")
     if base:
         return Path(base)
-    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ValorantAccountManager"
+    root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    new_dir = root / "Kunai"
+    old_dir = root / "ValorantAccountManager"
+    if not new_dir.exists() and old_dir.is_dir():
+        # 「VALORANT Account Manager」からの改名に伴う一度きりの移行。
+        # コピーではなく rename にして、保管庫を失わないようにする。
+        try:
+            old_dir.rename(new_dir)
+        except OSError:
+            return old_dir
+    return new_dir
 
 
 class Vault:

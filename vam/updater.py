@@ -28,8 +28,8 @@ import requests
 
 from .version import __version__
 
-REPO = "Simohayhe/valorant-account-manager"
-ASSET_NAME = "ValorantAccountManager.exe"
+REPO = "Simohayhe/kunai"
+ASSET_NAME = "Kunai.exe"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 API_BASE = f"https://api.github.com/repos/{REPO}"
 

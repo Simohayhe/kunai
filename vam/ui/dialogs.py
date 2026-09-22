@@ -35,7 +35,7 @@ class UnlockDialog(QDialog):
         layout.setSpacing(14)
         layout.setContentsMargins(22, 20, 22, 20)
 
-        title = QLabel("VALORANT Account Manager")
+        title = QLabel("Kunai")
         title.setObjectName("Title")
         layout.addWidget(title)
 

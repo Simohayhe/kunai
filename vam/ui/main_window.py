@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
         self._pending_release: updater.Release | None = None
         self._update_check_token: object | None = None
 
-        self.setWindowTitle("VALORANT Account Manager")
+        self.setWindowTitle("Kunai")
         self.resize(1080, 700)
         self.setStyleSheet(theme.STYLESHEET)
 
@@ -109,13 +109,13 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(18, 11, 18, 11)
         layout.setSpacing(11)
 
-        mark = QLabel("VALORANT")
+        mark = QLabel("KUNAI")
         mark.setStyleSheet(
-            f"color:{theme.ACCENT}; font-size:16px; font-weight:800; letter-spacing:2px;"
+            f"color:{theme.TEAL}; font-size:16px; font-weight:800; letter-spacing:2px;"
             "border:none;"
         )
         layout.addWidget(mark)
-        sub = QLabel("ACCOUNT MANAGER")
+        sub = QLabel("VALORANT ACCOUNT MANAGER")
         sub.setStyleSheet(
             f"color:{theme.TEXT_DIM}; font-size:11px; letter-spacing:2px; border:none;"
         )

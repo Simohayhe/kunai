@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NAME = "ValorantAccountManager"
+NAME = "Kunai"
+ICON = ROOT / "assets" / "icon.ico"
 
 # 使っていない Qt モジュール。特に WebEngine は単体で 100MB を超える
 EXCLUDES = [
@@ -55,6 +56,8 @@ def build() -> Path:
         "--specpath", str(ROOT / "build"),
         "--collect-submodules", "vam",
     ]
+    if ICON.is_file():
+        args += ["--icon", str(ICON), "--add-data", f"{ICON};assets"]
     for module in EXCLUDES:
         args += ["--exclude-module", module]
     args.append(str(ROOT / "main.py"))

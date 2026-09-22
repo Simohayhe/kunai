@@ -1,4 +1,4 @@
-"""VALORANT Account Manager — エントリポイント。
+"""Kunai — VALORANT アカウント切り替えツール。エントリポイント。
 
   python main.py             通常起動
   python main.py --demo      モック環境で起動（VALORANT 未インストールでも動く）
@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QDialog
 
 from vam import diagnostics
@@ -22,7 +23,7 @@ from vam.ui.main_window import MainWindow
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="VALORANT Account Manager")
+    parser = argparse.ArgumentParser(description="Kunai — VALORANT アカウント切り替えツール")
     parser.add_argument("--demo", action="store_true",
                         help="モック Riot 環境で起動する（動作確認用）")
     parser.add_argument("--app-dir", type=Path, default=None,
@@ -55,7 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("VALORANT Account Manager")
+    app.setApplicationName("Kunai")
+    icon_path = Path(__file__).parent / "assets" / "icon.ico"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     # exe だと標準エラーがどこにも出ないので、落ちた理由をログに残して知らせる
     def on_crash(log_file, exc):
