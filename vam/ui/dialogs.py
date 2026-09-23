@@ -316,8 +316,8 @@ class SettingsDialog(QDialog):
     MainWindow がそれらに配線する。
     """
 
-    def __init__(self, webhook_url: str, step_delay: float, current_version: str,
-                parent=None):
+    def __init__(self, webhook_url: str, mention: str, step_delay: float,
+                stay_signed_in: bool, current_version: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("設定")
         self.setMinimumWidth(460)
@@ -350,10 +350,13 @@ class SettingsDialog(QDialog):
         self.webhook = QLineEdit(webhook_url)
         self.webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
         notify_form.addRow("Webhook URL", self.webhook)
+        self.mention = QLineEdit(mention)
+        self.mention.setPlaceholderText("@everyone / <@ユーザーID> / <@&ロールID> など (任意)")
+        notify_form.addRow("メンション", self.mention)
         layout.addLayout(notify_form)
 
         # -- ログイン ---------------------------------------------------
-        login_title = QLabel("自動ログインの待機時間")
+        login_title = QLabel("自動ログイン")
         login_title.setObjectName("SectionTitle")
         layout.addWidget(login_title)
 
@@ -376,6 +379,15 @@ class SettingsDialog(QDialog):
         self.delay.setValue(step_delay)
         login_form.addRow("待機時間", self.delay)
         layout.addLayout(login_form)
+
+        self.stay_signed_in = QCheckBox("「サインイン状態を維持」を自動で有効にする")
+        self.stay_signed_in.setToolTip(
+            "自動ログイン時、パスワード入力の後にこのチェックボックスも"
+            "自動で入れます。無効だとセッションが保存されず、次回から"
+            "切り替えにパスワードが毎回要ります。"
+        )
+        self.stay_signed_in.setChecked(stay_signed_in)
+        layout.addWidget(self.stay_signed_in)
 
         # -- 更新 ---------------------------------------------------
         update_title = QLabel("ソフトの更新")
@@ -412,8 +424,14 @@ class SettingsDialog(QDialog):
     def webhook_url(self) -> str:
         return self.webhook.text().strip()
 
+    def mention_text(self) -> str:
+        return self.mention.text().strip()
+
     def step_delay(self) -> float:
         return self.delay.value()
+
+    def stay_signed_in_enabled(self) -> bool:
+        return self.stay_signed_in.isChecked()
 
     # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
     def set_checking(self) -> None:

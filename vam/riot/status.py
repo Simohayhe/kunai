@@ -135,10 +135,15 @@ def summarize(current: StatusSnapshot, locale: str = "ja_JP") -> str:
     return "　".join(parts)
 
 
-def notify_discord(webhook_url: str, event: StatusEvent, timeout: float = 10.0) -> None:
+def notify_discord(webhook_url: str, event: StatusEvent, timeout: float = 10.0,
+                    mention: str = "") -> None:
     label = "メンテナンス" if event.kind == "maintenance" else "障害"
     action = "発生/開始" if event.action == "started" else "終了/復旧"
-    lines = [f"**VALORANT {label}{action}**", event.title]
+    lines = []
+    if mention:
+        lines.append(mention)
+    lines.append(f"**VALORANT {label}{action}**")
+    lines.append(event.title)
     if event.severity:
         lines.append(f"重大度: {event.severity}")
     if event.detail and event.detail != event.title:

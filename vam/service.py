@@ -40,6 +40,7 @@ class SwitchResult:
 # 設定キー。settings.json に平文で置く (機密ではない)
 SETTING_STAY_SIGNED_IN = "stay_signed_in"
 SETTING_DISCORD_WEBHOOK = "discord_webhook_url"
+SETTING_DISCORD_MENTION = "discord_mention"
 SETTING_LOGIN_STEP_DELAY = "login_step_delay"
 DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
@@ -82,6 +83,17 @@ class AccountService:
         self.vault.save_settings(settings)
 
     @property
+    def discord_mention(self) -> str:
+        """Discord 通知の先頭に添えるメンション文字列。例: @everyone, <@ユーザーID>"""
+        return str(self.vault.settings().get(SETTING_DISCORD_MENTION, ""))
+
+    @discord_mention.setter
+    def discord_mention(self, value: str) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_DISCORD_MENTION] = value.strip()
+        self.vault.save_settings(settings)
+
+    @property
     def login_step_delay(self) -> float:
         """自動ログインで、フォームが出てから入力を始めるまでの待機秒数。
 
@@ -114,10 +126,11 @@ class AccountService:
 
         if previous is not None:
             webhook = self.discord_webhook_url
+            mention = self.discord_mention
             for event in status.diff(previous, current):
                 if webhook:
                     try:
-                        status.notify_discord(webhook, event)
+                        status.notify_discord(webhook, event, mention=mention)
                     except status.StatusError as exc:
                         progress(str(exc))
 

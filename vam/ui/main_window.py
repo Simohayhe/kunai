@@ -454,7 +454,9 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dialog = SettingsDialog(
             webhook_url=self.service.discord_webhook_url,
+            mention=self.service.discord_mention,
             step_delay=self.service.login_step_delay,
+            stay_signed_in=self.service.stay_signed_in,
             current_version=__version__,
             parent=self,
         )
@@ -464,7 +466,9 @@ class MainWindow(QMainWindow):
             dialog.set_update_available(self._pending_release.tag)
         if dialog.exec():
             self.service.discord_webhook_url = dialog.webhook_url()
+            self.service.discord_mention = dialog.mention_text()
             self.service.login_step_delay = dialog.step_delay()
+            self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.status.showMessage("設定を保存しました", 4000)
 
     # ==================================================================

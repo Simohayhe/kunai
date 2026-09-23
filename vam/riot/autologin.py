@@ -429,83 +429,6 @@ def stay_signed_in_state(window: Window) -> bool | None:
     )
 
 
-def _has_focus_ring(window: Window, required: int = 2) -> bool:
-    """チェックボックスにフォーカスリングが出ているか。
-
-    Tab で回ってきたかを判定するのに使う。周囲 4 点のうち、
-    他より明らかに暗い点が required 個以上あればリングとみなす。
-    明るさの絶対値ではなく相対差で見るので、画面の暗転に影響されない。
-
-    実測ではリングは角丸で、4 点のうち 2 点に乗った。1 点だけで
-    判定すると、たまたま暗い何かに反応してボタン上で Space を
-    押しかねないので 2 点以上を要求する。
-    """
-    x, y = field_position(window, STAY_SIGNED_IN)
-    points = [(x - 12, y), (x + 12, y), (x, y - 12), (x, y + 12)]
-    lums = sorted(sum(get_pixel(px, py)) for px, py in points)
-    threshold = lums[-1] - 200
-    return sum(1 for value in lums if value < threshold) >= required
-
-
-def ensure_stay_signed_in(window: Window, max_tabs: int = 14,
-                          restore_focus: bool = True) -> bool:
-    """「サインイン状態を維持」を有効にする。キーボードだけで行う。
-
-    Tab を送りながらフォーカスリングを見て、チェックボックスに
-    到達したら Space で入れる。座標クリックに頼らないので、
-    画面配置が多少変わっても追随する。
-
-    既に有効なら何もしない。判定できないときも触らない。
-    誤って外すと、ログインできてもセッションが保存されず、
-    切り替えに使えなくなるため。
-
-    実測 (Riot Client v138.0.1): ユーザー名欄から Tab 7 回で到達する。
-    ただし開始位置は状況で変わるので、フォームを一周できるだけの
-    回数を回す。フォーカスが既に先へ行っていても拾えるようにするため。
-    """
-    if stay_signed_in_state(window) is True:
-        return True
-
-    for used in range(1, max_tabs + 1):
-        press(VK_TAB)
-        time.sleep(0.18)
-        if not _has_focus_ring(window):
-            continue
-
-        # リングが出ていても、そこに「未チェックのチェックボックス」が
-        # 見えていなければ押さない。ソーシャルログインのボタン上で
-        # Space を押すと OAuth が始まってしまう。
-        state = stay_signed_in_state(window)
-        if state is True:
-            _rewind_focus(used if restore_focus else 0)
-            return True
-        if state is not False:
-            _rewind_focus(used if restore_focus else 0)
-            return False
-
-        press(VK_SPACE)
-        time.sleep(0.25)
-        result = stay_signed_in_state(window) is True
-        _rewind_focus(used if restore_focus else 0)
-        return result
-
-    _rewind_focus(max_tabs if restore_focus else 0)
-    return False
-
-
-def _rewind_focus(steps: int) -> None:
-    """Shift+Tab で元の位置までフォーカスを戻す。
-
-    チェックボックスを先に処理してから入力欄へ戻ることで、
-    パスワードを打った直後に余計なキーを挟まず Enter まで行ける。
-    """
-    for _ in range(steps):
-        press(VK_TAB, modifiers=(VK_SHIFT,))
-        time.sleep(0.04)
-    if steps:
-        time.sleep(0.15)
-
-
 def ensure_active(window: Window, attempts: int = 3) -> bool:
     """入力前に、対象ウィンドウが確実に前面かを確かめる。
 
@@ -607,11 +530,6 @@ def perform_login(username: str, password: str, window: Window | None = None,
         )
     time.sleep(settle)
 
-    # 「サインイン状態を維持」は先に片付ける。既に有効なら画素を 1 点
-    # 読むだけで済む。無効なら Tab で探して入れ、Shift+Tab で入力欄へ戻る。
-    # 後回しにすると、パスワードを打った直後に Tab が挟まってしまう。
-    kept = ensure_stay_signed_in(w) if stay_signed_in else None
-
     # 起動直後のログイン画面はユーザー名欄にフォーカスが載っている。
     # ウィンドウを正しくアクティブ化できていれば、クリックは要らない。
     # 既存の入力を消してから打つ
@@ -640,9 +558,28 @@ def perform_login(username: str, password: str, window: Window | None = None,
     press(VK_BACK)
     type_text(password)
 
-    # ここから先は余計なキーを挟まない。パスワードの直後は Enter だけ。
     submitted = False
-    if submit:
+    kept: bool | None = None
+    if stay_signed_in:
+        # 実機で確認済みの手順: パスワード入力の直後に Tab を 6 回で
+        # 「サインイン状態を維持」のチェックボックスに到達し、Enter で
+        # チェックが入る。続けて Tab を 1 回でサインインボタンに移り、
+        # Enter で送信する。ここは決め打ちの回数だが、実機で繰り返し
+        # 確認できている値なのでそのまま使う。
+        time.sleep(0.15)
+        for _ in range(6):
+            press(VK_TAB)
+            time.sleep(0.12)
+        press(VK_RETURN)
+        time.sleep(0.25)
+        kept = stay_signed_in_state(w)
+        if submit:
+            press(VK_TAB)
+            time.sleep(0.1)
+            press(VK_RETURN)
+            submitted = True
+    elif submit:
+        # ここから先は余計なキーを挟まない。パスワードの直後は Enter だけ。
         time.sleep(0.15)
         press(VK_RETURN)
         submitted = True
