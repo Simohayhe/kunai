@@ -939,18 +939,26 @@ class MainWindow(QMainWindow):
         self.detail.history.set_message("読み込み中…")
         workers.run(
             self.service.match_stats, account,
-            on_done=self._on_history,
-            on_error=lambda m: self.detail.history.set_message(m),
+            on_done=lambda stats: self._on_history(account.id, stats),
+            on_error=lambda m: self._on_history_failed(account.id, m),
             on_progress=self.status.showMessage,
         )
 
-    def _on_history(self, stats) -> None:
+    def _on_history(self, account_id: str, stats) -> None:
+        # 取得中にアカウントを切り替えていたら、表示中のものを上書きしない。
+        if self.selected_id != account_id:
+            return
         try:
             maps = self.service.content.maps()
         except Exception:
             maps = {}
         self.detail.history.set_stats(stats)
         self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names())
+
+    def _on_history_failed(self, account_id: str, message: str) -> None:
+        if self.selected_id != account_id:
+            return
+        self.detail.history.set_message(message)
 
     def _show_inventory(self, account: Account) -> None:
         """キャッシュがあればそれを出し、無ければ集計する (ボタンを押させない)。"""

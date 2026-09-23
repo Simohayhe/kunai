@@ -80,6 +80,7 @@ class WeaponSkin:
     icon: str | None = None
     tier_name: str = "スタンダード"
     tier_color: str = "#8b8b8b"
+    tier_rank: int = 0
 
 
 @dataclass
@@ -948,10 +949,12 @@ class AccountService:
                 name=skin["name"], icon=skin["icon"],
                 tier_name=tier.get("name", "スタンダード"),
                 tier_color=tier.get("color", "#8b8b8b"),
+                tier_rank=tier.get("rank", 0),
             ))
 
         result = [g for g in groups.values() if g.skins]
         result.sort(key=lambda g: (-g.count, g.name))
+        # エディション (contenttiers の rank) の低い順。同ランクなら名前順。
         for g in result:
-            g.skins.sort(key=lambda s: s.name)
+            g.skins.sort(key=lambda s: (s.tier_rank, s.name))
         return result

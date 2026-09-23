@@ -124,7 +124,12 @@ def download(release: Release, dest_dir: Path, timeout: float = 60.0) -> Path:
 # 入れ替え
 # --------------------------------------------------------------------------
 # Meridian と同じ、バッチ + tasklist によるポーリング待ちにしてある。
-# PowerShell の Wait-Process 版よりシンプルで、実機で安定して動くことが確認済み。
+#
+# tasklist が PID を見失っても、exe 本体の掴み (メモリマップ) が Windows 側で
+# すぐには外れないことがあり、その直後に move を1回叩くだけだと実機で
+# サイレントに失敗することを確認した (move はエラーでもバッチを止めない
+# ので、そのまま気づかず古い exe を起動し直してしまう)。掴みが外れるまで
+# 数回リトライし、それでも駄目なら新しいファイルの場所を開いて知らせる。
 BAT_TEMPLATE = """@echo off
 chcp 65001 >nul
 rem Kunai の更新用。終わったら自分を消す。
@@ -134,8 +139,20 @@ if not errorlevel 1 (
   ping -n 2 127.0.0.1 >nul
   goto wait
 )
-move /y "{new_file}" "{target}" >nul
+set tries=0
+:retry
+move /y "{new_file}" "{target}" >nul 2>&1
+if exist "{new_file}" (
+  set /a tries+=1
+  if %tries% lss 15 (
+    ping -n 2 127.0.0.1 >nul
+    goto retry
+  )
+  start "" explorer.exe /select,"{new_file}"
+  goto cleanup
+)
 start "" "{target}"
+:cleanup
 del "%~f0"
 """
 
@@ -157,7 +174,17 @@ def apply_update(new_file: Path) -> None:
         encoding="utf-8",
     )
 
+    # PyInstaller の onefile ブートローダーは、自分の展開先フォルダなどを
+    # 子プロセスに伝えるため _PYI_APPLICATION_HOME_DIR / _PYI_ARCHIVE_FILE /
+    # _PYI_PARENT_PROCESS_LEVEL を環境変数に積んでいる (実機で確認済み:
+    # 値は 'C:\...\_MEIxxxxx' のような、このプロセス自身の展開先)。
+    # これを継承したままバッチ経由で新しい exe を起動すると、そちらは
+    # 自分で展開せずに (こちらが終了時に消してしまう) 古い展開先を
+    # 使おうとして "Failed to load Python DLL" で起動できなくなる。
+    # バッチとその先の再起動には渡さない。
+    env = {k: v for k, v in os.environ.items() if not k.startswith("_PYI_")}
+
     subprocess.Popen(
         ["cmd", "/c", str(bat_path)],
-        creationflags=_NO_WINDOW, close_fds=True,
+        creationflags=_NO_WINDOW, close_fds=True, env=env,
     )

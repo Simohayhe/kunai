@@ -354,6 +354,7 @@ class InventoryTab(QWidget):
         self._groups: list = []
         self._selected_weapon_id: str | None = None
         self._weapon_buttons: dict[str, QPushButton] = {}
+        self._sort_desc = False  # エディションの低い順 (昇順) が既定
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 16, 0, 0)
@@ -381,6 +382,14 @@ class InventoryTab(QWidget):
         self.weapon_row.addStretch(1)
         self.weapon_scroll.setWidget(weapon_container)
         layout.addWidget(self.weapon_scroll)
+
+        sort_row = QHBoxLayout()
+        sort_row.addStretch(1)
+        self.sort_button = QPushButton("エディション: 昇順")
+        self.sort_button.setObjectName("Ghost")
+        self.sort_button.clicked.connect(self._toggle_sort)
+        sort_row.addWidget(self.sort_button)
+        layout.addLayout(sort_row)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -451,8 +460,16 @@ class InventoryTab(QWidget):
         if not group or not group.skins:
             self.rows.insertWidget(0, self._center_label("このカテゴリのスキンはありません"))
             return
-        for skin in group.skins:
+        skins = sorted(group.skins, key=lambda s: (s.tier_rank, s.name),
+                       reverse=self._sort_desc)
+        for skin in skins:
             self.rows.insertWidget(self.rows.count() - 1, self._skin_row(skin))
+
+    def _toggle_sort(self) -> None:
+        self._sort_desc = not self._sort_desc
+        self.sort_button.setText(f"エディション: {'降順' if self._sort_desc else '昇順'}")
+        if self._selected_weapon_id:
+            self.select_weapon(self._selected_weapon_id)
 
     @staticmethod
     def _center_label(text: str) -> QLabel:
