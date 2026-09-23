@@ -215,6 +215,32 @@ class HistoryTab(QWidget):
         top.addWidget(self.reload)
         layout.addLayout(top)
 
+        self.summary = QWidget()
+        self.summary.setVisible(False)
+        summary_layout = QVBoxLayout(self.summary)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(8)
+
+        tiles = QHBoxLayout()
+        tiles.setSpacing(8)
+        self.hs_tile = _stat_tile("HS率", "—")
+        tiles.addWidget(self.hs_tile)
+        self.win_tile = _stat_tile("直近の勝率", "—")
+        tiles.addWidget(self.win_tile)
+        summary_layout.addLayout(tiles)
+
+        self.agent_label = QLabel()
+        self.agent_label.setObjectName("SubTitle")
+        self.agent_label.setWordWrap(True)
+        summary_layout.addWidget(self.agent_label)
+
+        self.map_label = QLabel()
+        self.map_label.setObjectName("SubTitle")
+        self.map_label.setWordWrap(True)
+        summary_layout.addWidget(self.map_label)
+
+        layout.addWidget(self.summary)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.container = QWidget()
@@ -237,12 +263,39 @@ class HistoryTab(QWidget):
                 item.widget().deleteLater()
 
     def set_message(self, text: str) -> None:
+        self.summary.setVisible(False)
         self.clear()
         msg = QLabel(text)
         msg.setObjectName("SubTitle")
         msg.setAlignment(Qt.AlignCenter)
         msg.setWordWrap(True)
         self.rows.insertWidget(0, msg)
+
+    def set_stats(self, stats) -> None:
+        """HS率・エージェント別/マップ別勝率のまとめを表示する。試合が無ければ隠す。"""
+        if not stats.games:
+            self.summary.setVisible(False)
+            return
+        self.summary.setVisible(True)
+        self._set_tile(self.hs_tile, f"{stats.headshot_pct:.0f}%")
+        self._set_tile(self.win_tile, f"{stats.win_rate:.0f}%  ({stats.wins}/{stats.games})")
+        self.agent_label.setText(
+            "エージェント別: " + " / ".join(
+                f"{a.name} {a.win_rate:.0f}%({a.wins}/{a.games})" for a in stats.by_agent
+            )
+        )
+        self.map_label.setText(
+            "マップ別: " + " / ".join(
+                f"{m.name} {m.win_rate:.0f}%({m.wins}/{m.games})" for m in stats.by_map
+            )
+        )
+
+    @staticmethod
+    def _set_tile(tile: QFrame, value: str) -> None:
+        # _stat_tile はキャプション・値の順で QLabel を 2 つ積む。値は 2 番目。
+        item = tile.layout().itemAt(1)
+        if item and item.widget():
+            item.widget().setText(value)
 
     def set_matches(self, matches: list[CompetitiveUpdate], map_names: dict,
                     tier_names: dict | None = None) -> None:

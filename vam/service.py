@@ -5,7 +5,7 @@ UI からはここだけを呼ぶ。進捗はコールバックで文字列を�
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from . import diagnostics
@@ -35,6 +35,43 @@ class SwitchResult:
     method: str            # "session" か "autologin"
     launched: bool
     warnings: list[str]
+
+
+@dataclass
+class AgentStat:
+    name: str
+    games: int = 0
+    wins: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        return (self.wins / self.games * 100) if self.games else 0.0
+
+
+@dataclass
+class MapStat:
+    name: str
+    games: int = 0
+    wins: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        return (self.wins / self.games * 100) if self.games else 0.0
+
+
+@dataclass
+class MatchStats:
+    """直近の試合から集計した HS 率・エージェント別/マップ別勝率。"""
+    matches: list[api.CompetitiveUpdate] = field(default_factory=list)
+    games: int = 0
+    wins: int = 0
+    headshot_pct: float = 0.0
+    by_agent: list[AgentStat] = field(default_factory=list)
+    by_map: list[MapStat] = field(default_factory=list)
+
+    @property
+    def win_rate(self) -> float:
+        return (self.wins / self.games * 100) if self.games else 0.0
 
 
 # 設定キー。settings.json に平文で置く (機密ではない)
@@ -773,6 +810,67 @@ class AccountService:
         client = api.ValorantApi(result, region=result.region or account.region,
                                  client_version=version)
         return client.competitive_history(count=count)
+
+    def match_stats(self, account: Account, count: int = 20,
+                    progress: Progress = _noop) -> MatchStats:
+        """HS 率・エージェント別/マップ別勝率を、直近の試合から集計する。
+
+        競技試合一覧 (1 回) に加えて、試合ごとの詳細 (roundResults の
+        ダメージ内訳が要る) を 1 件ずつ引くので、count 件数分だけ通信が増える。
+        """
+        result = self.authenticate(account)
+        try:
+            version = self.content.client_version()
+        except content.ContentError:
+            version = ""
+        client = api.ValorantApi(result, region=result.region or account.region,
+                                 client_version=version)
+        matches = client.competitive_history(count=count)
+
+        try:
+            agents = self.content.agents()
+        except content.ContentError:
+            agents = {}
+        try:
+            maps = self.content.maps()
+        except content.ContentError:
+            maps = {}
+
+        stats = MatchStats(matches=matches)
+        agent_buckets: dict[str, AgentStat] = {}
+        map_buckets: dict[str, MapStat] = {}
+        headshots = bodyshots = legshots = 0
+
+        for i, m in enumerate(matches):
+            progress(f"{account.display_name}: 試合 {i + 1}/{len(matches)} の詳細を取得中…")
+            try:
+                summary = client.match_summary(m.match_id, puuid=result.puuid)
+            except api.ApiError:
+                summary = None
+            if not summary:
+                continue
+
+            stats.games += 1
+            stats.wins += int(summary.won)
+            headshots += summary.headshots
+            bodyshots += summary.bodyshots
+            legshots += summary.legshots
+
+            agent_name = agents.get(summary.character_id, {}).get("name") or "不明なエージェント"
+            agent = agent_buckets.setdefault(agent_name, AgentStat(name=agent_name))
+            agent.games += 1
+            agent.wins += int(summary.won)
+
+            map_name = maps.get(summary.map_id, {}).get("name") or "不明なマップ"
+            map_stat = map_buckets.setdefault(map_name, MapStat(name=map_name))
+            map_stat.games += 1
+            map_stat.wins += int(summary.won)
+
+        total_shots = headshots + bodyshots + legshots
+        stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
+        stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
+        stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
+        return stats
 
     # -- 所持品の集計 -------------------------------------------------------
     def summarize_inventory(self, account: Account) -> dict:

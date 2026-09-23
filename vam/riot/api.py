@@ -104,6 +104,27 @@ class CompetitiveUpdate:
 
 
 @dataclass
+class MatchSummary:
+    """1 試合分。HS 率・エージェント別/マップ別勝率の集計に使う。"""
+    match_id: str = ""
+    map_id: str = ""
+    character_id: str = ""
+    won: bool = False
+    kills: int = 0
+    deaths: int = 0
+    assists: int = 0
+    headshots: int = 0
+    bodyshots: int = 0
+    legshots: int = 0
+    started_at: int = 0
+
+    @property
+    def headshot_pct(self) -> float:
+        total = self.headshots + self.bodyshots + self.legshots
+        return (self.headshots / total * 100) if total else 0.0
+
+
+@dataclass
 class MmrSnapshot:
     tier: int = 0
     rr: int = 0
@@ -220,6 +241,48 @@ class ValorantApi:
                 rr_earned=m.get("RankedRatingEarned", 0),
             ))
         return out
+
+    def match_details(self, match_id: str) -> dict:
+        return self._get(f"/match-details/v1/matches/{match_id}") or {}
+
+    def match_summary(self, match_id: str, puuid: str | None = None) -> MatchSummary | None:
+        """1 試合分の HS/BS/LS・使用エージェント・勝敗をまとめる。
+
+        HS 率などの内訳は player の stats には無く、roundResults[].playerStats[]
+        の damage[] に相手ごとの内訳として入っている (実機で確認済み)。
+        全ラウンド分を合算する。
+        """
+        puuid = puuid or self.auth.puuid
+        data = self.match_details(match_id)
+        me = next((p for p in data.get("players", []) if p.get("subject") == puuid), None)
+        if not me:
+            return None
+
+        team = next(
+            (t for t in data.get("teams", []) if t.get("teamId") == me.get("teamId")), None
+        )
+        headshots = bodyshots = legshots = 0
+        for round_result in data.get("roundResults") or []:
+            for player_stats in round_result.get("playerStats") or []:
+                if player_stats.get("subject") != puuid:
+                    continue
+                for dmg in player_stats.get("damage") or []:
+                    headshots += dmg.get("headshots", 0)
+                    bodyshots += dmg.get("bodyshots", 0)
+                    legshots += dmg.get("legshots", 0)
+
+        stats = me.get("stats") or {}
+        match_info = data.get("matchInfo") or {}
+        return MatchSummary(
+            match_id=match_id,
+            map_id=match_info.get("mapId", ""),
+            character_id=me.get("characterId", ""),
+            won=bool(team.get("won")) if team else False,
+            kills=stats.get("kills", 0), deaths=stats.get("deaths", 0),
+            assists=stats.get("assists", 0),
+            headshots=headshots, bodyshots=bodyshots, legshots=legshots,
+            started_at=match_info.get("gameStartMillis", 0),
+        )
 
     # -- ウォレット / 所持品 -----------------------------------------------
     def wallet(self, puuid: str | None = None) -> dict[str, int]:

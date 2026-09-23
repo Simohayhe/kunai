@@ -904,17 +904,19 @@ class MainWindow(QMainWindow):
             return
         self.detail.history.set_message("読み込み中…")
         workers.run(
-            self.service.match_history, account,
+            self.service.match_stats, account,
             on_done=self._on_history,
             on_error=lambda m: self.detail.history.set_message(m),
+            on_progress=self.status.showMessage,
         )
 
-    def _on_history(self, matches) -> None:
+    def _on_history(self, stats) -> None:
         try:
             maps = self.service.content.maps()
         except Exception:
             maps = {}
-        self.detail.history.set_matches(matches, maps, self.service.content.tier_names())
+        self.detail.history.set_stats(stats)
+        self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names())
 
     def load_inventory(self) -> None:
         account = self.vault.get(self.selected_id) if self.selected_id else None
