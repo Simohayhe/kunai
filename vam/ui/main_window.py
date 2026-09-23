@@ -49,6 +49,9 @@ class MainWindow(QMainWindow):
         self._switch_token: object | None = None
         self._switch_cancel_event: threading.Event | None = None
         self._auto_refreshing = False
+        # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
+        # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
+        self._inventory_cache: dict[str, list] = {}
 
         self.setWindowTitle("Kunai")
         self.resize(1080, 700)
@@ -371,7 +374,11 @@ class MainWindow(QMainWindow):
                 "Riot Client でログインしてから\n「現在のを取り込む」を押すと登録できます。"
             )
 
-    def select_account(self, account_id: str) -> None:
+    def select_account(self, account_id: str, *, force_reload: bool = False) -> None:
+        # 同じアカウントを選び直しただけ (一覧の再描画など) では、戦績の
+        # 再取得 (通信を伴う) や所持品の再集計を毎回走らせない。データが
+        # 実際に変わったとき (更新後など) だけ force_reload で強制する。
+        is_new_selection = force_reload or account_id != self.selected_id
         self.selected_id = account_id
         for cid, card in self.cards.items():
             card.set_selected(cid == account_id)
@@ -387,8 +394,9 @@ class MainWindow(QMainWindow):
         info = self.service.session_status(account)
         icon = self._rank_pixmap(account.rank.tier)
         self.detail.overview.update_account(account, info, icon)
-        self.detail.history.set_message("「読み込む」で直近のランク変動を取得します")
-        self.detail.inventory.set_message("「集計する」で所持スキンを一覧にします")
+        if is_new_selection:
+            self.load_history()
+            self._show_inventory(account)
 
         can_switch = (info.valid and not info.expired) or bool(
             account.username and account.password
@@ -861,9 +869,10 @@ class MainWindow(QMainWindow):
 
     def _on_refreshed(self, account: Account) -> None:
         self._set_busy(False, f"{account.display_name} を更新しました")
+        self._inventory_cache.pop(account.id, None)
         self.reload_accounts()
         if self.selected_id == account.id:
-            self.select_account(account.id)
+            self.select_account(account.id, force_reload=True)
 
     def auto_refresh_current_account(self) -> None:
         """ソフト起動中、今ログイン中のアカウントのランク・ウォレットを
@@ -886,8 +895,7 @@ class MainWindow(QMainWindow):
         self._auto_refreshing = False
         self.reload_accounts()
         if self.selected_id == account.id:
-            self.select_account(account.id)
-            self.load_history()
+            self.select_account(account.id, force_reload=True)
 
     def _on_auto_refresh_failed(self, message: str) -> None:
         self._auto_refreshing = False
@@ -912,7 +920,10 @@ class MainWindow(QMainWindow):
     def _on_refresh_all_done(self, errors: dict) -> None:
         self._set_busy(False, "更新が完了しました" if not errors
                        else f"{len(errors)} 件が失敗しました")
+        self._inventory_cache.clear()
         self.reload_accounts()
+        if self.selected_id:
+            self.select_account(self.selected_id, force_reload=True)
         if errors:
             lines = []
             for account_id, message in errors.items():
@@ -941,7 +952,16 @@ class MainWindow(QMainWindow):
         self.detail.history.set_stats(stats)
         self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names())
 
+    def _show_inventory(self, account: Account) -> None:
+        """キャッシュがあればそれを出し、無ければ集計する (ボタンを押させない)。"""
+        cached = self._inventory_cache.get(account.id)
+        if cached is not None:
+            self.detail.inventory.set_groups(cached)
+        else:
+            self.load_inventory()
+
     def load_inventory(self) -> None:
+        """所持品を集計し直す (キャッシュを無視する)。「更新」ボタン用。"""
         account = self.vault.get(self.selected_id) if self.selected_id else None
         if not account:
             return
@@ -953,9 +973,14 @@ class MainWindow(QMainWindow):
         self.detail.inventory.set_message("集計中…")
         workers.run(
             self.service.weapon_inventory, account,
-            on_done=self.detail.inventory.set_groups,
+            on_done=lambda groups: self._on_inventory_loaded(account.id, groups),
             on_error=lambda m: self.detail.inventory.set_message(m),
         )
+
+    def _on_inventory_loaded(self, account_id: str, groups: list) -> None:
+        self._inventory_cache[account_id] = groups
+        if self.selected_id == account_id:
+            self.detail.inventory.set_groups(groups)
 
     # ==================================================================
     # メニュー

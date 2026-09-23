@@ -210,7 +210,7 @@ class HistoryTab(QWidget):
         title.setObjectName("SectionTitle")
         top.addWidget(title)
         top.addStretch(1)
-        self.reload = QPushButton("読み込む")
+        self.reload = QPushButton("更新")
         self.reload.clicked.connect(self.reload_requested.emit)
         top.addWidget(self.reload)
         layout.addLayout(top)
@@ -251,7 +251,7 @@ class HistoryTab(QWidget):
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
 
-        self.empty = QLabel("「読み込む」で直近のランク変動を取得します")
+        self.empty = QLabel("読み込み中…")
         self.empty.setObjectName("SubTitle")
         self.empty.setAlignment(Qt.AlignCenter)
         self.rows.insertWidget(0, self.empty)
@@ -364,7 +364,7 @@ class InventoryTab(QWidget):
         title.setObjectName("SectionTitle")
         top.addWidget(title)
         top.addStretch(1)
-        self.reload = QPushButton("集計する")
+        self.reload = QPushButton("更新")
         self.reload.clicked.connect(self.reload_requested.emit)
         top.addWidget(self.reload)
         layout.addLayout(top)
@@ -392,7 +392,7 @@ class InventoryTab(QWidget):
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
 
-        self.set_message("「集計する」で所持スキンを一覧にします")
+        self.set_message("集計中…")
 
     def _clear_weapon_chips(self) -> None:
         self._weapon_buttons.clear()
