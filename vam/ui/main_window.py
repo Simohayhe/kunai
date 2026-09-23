@@ -508,7 +508,6 @@ class MainWindow(QMainWindow):
         if dialog:
             dialog.set_checking()
 
-        # gh CLI が稀に応答を返さないことがある (実機で確認済み)。
         # updater 側にもタイムアウトは入れてあるが、万一それをすり抜けても
         # 設定画面が「確認中…」のまま固まって見えることがないよう、
         # ここでも一定時間で諦めて UI を戻す。
@@ -549,7 +548,7 @@ class MainWindow(QMainWindow):
         if dialog:
             try:
                 dialog.set_check_failed(
-                    "確認がタイムアウトしました。ネットワークや gh CLI の状態を確認してください。"
+                    "確認がタイムアウトしました。ネットワーク接続を確認してください。"
                 )
             except RuntimeError:
                 pass  # ダイアログが既に閉じられている

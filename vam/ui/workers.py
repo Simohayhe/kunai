@@ -1,12 +1,18 @@
 """重い処理をバックグラウンドに逃がす。
 
 切り替えも情報取得も数秒〜数十秒かかるので、UI スレッドで走らせると固まる。
+QThreadPool ではなく素の threading.Thread + Qt シグナルの組み合わせで動かす
+(QThreadPool の QRunnable が理由不明のまま完了シグナルを返さないことが
+実機であったため)。
 
-QThreadPool ではなく素の threading.Thread を使う。実機で、QThreadPool に
-渡した QRunnable が理由不明のまま完了シグナルを返さないことがある
-(再現率はまちまちだが、更新確認が「確認中…」のまま固まる形で発現した)
-のを確認したため。同じ処理を素の threading.Thread + Qt シグナルの
-組み合わせで動かすと安定して完了する。
+signal.connect() は必ず Qt.QueuedConnection を明示する。また _ALIVE から
+の後始末は、emit() 直後 (バックグラウンドスレッド側) ではなく、
+finished/failed が実際に配送された後 (メインスレッド側) でやる。
+キュー接続の emit() は「積むだけ」で即座に返るので、その直後に
+_ALIVE.discard() すると、メインスレッドがまだキューを処理していない
+うちに Task (と Qt 側の _Signals) への唯一の強参照が消え、GC で回収されて
+しまうことがあった。実機のビルドで、渡した完了コールバックが一度も呼ばれず
+「確認中…」のまま固まる形で発現し、再現率はまちまちだった。
 """
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ import time
 import traceback
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 
 # 走行中の Task を掴んでおく。ここに残さないと Python 側の参照が消えて
 # GC され、スレッドが動いている最中にシグナル送出元が破棄される。
@@ -58,8 +64,8 @@ class Task:
             self._emit(self.signals.failed, str(exc) or exc.__class__.__name__)
         else:
             self._emit(self.signals.finished, result)
-        finally:
-            _ALIVE.discard(self)
+        # _ALIVE の後始末はメインスレッド側 (finished/failed 配送後) でやる。
+        # ここではまだ触らない (モジュール先頭のコメント参照)。
 
     def _progress(self, message: str) -> None:
         self._emit(self.signals.progress, message)
@@ -71,11 +77,15 @@ def run(fn: Callable, *args, on_done: Callable | None = None,
     task = Task(fn, *args, wants_progress=wants_progress or on_progress is not None,
                 **kwargs)
     if on_done:
-        task.signals.finished.connect(on_done)
+        task.signals.finished.connect(on_done, Qt.QueuedConnection)
     if on_error:
-        task.signals.failed.connect(on_error)
+        task.signals.failed.connect(on_error, Qt.QueuedConnection)
     if on_progress:
-        task.signals.progress.connect(on_progress)
+        task.signals.progress.connect(on_progress, Qt.QueuedConnection)
+    # ユーザーのコールバックより後に繋いでおく。同じシグナルへのキュー接続は
+    # 繋いだ順に配送されるので、後始末は必ず on_done/on_error の後に走る。
+    task.signals.finished.connect(lambda _r: _ALIVE.discard(task), Qt.QueuedConnection)
+    task.signals.failed.connect(lambda _m: _ALIVE.discard(task), Qt.QueuedConnection)
     _ALIVE.add(task)
     threading.Thread(target=task.run, daemon=True).start()
     return task

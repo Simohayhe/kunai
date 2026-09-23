@@ -459,6 +459,31 @@ class SettingsDialog(QDialog):
     def stay_signed_in_enabled(self) -> bool:
         return self.stay_signed_in.isChecked()
 
+    # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
+    def set_checking(self) -> None:
+        self.check_button.setEnabled(False)
+        self.check_button.setText("確認中…")
+        self.update_status.setText("")
+
+    def set_up_to_date(self) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText("最新の状態です。")
+        self.update_button.setVisible(False)
+
+    def set_check_failed(self, message: str) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText(message)
+        self.update_button.setVisible(False)
+
+    def set_update_available(self, tag: str) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("今すぐ確認")
+        self.update_status.setText(f"{tag} が利用できます。")
+        self.update_button.setText(f"{tag} に更新")
+        self.update_button.setVisible(True)
+
 
 class PlayerSearchDialog(QDialog):
     """Riot ID (Name#TAG) で他プレイヤーのレベル・ランクを検索する (HenrikDev API)。"""
@@ -522,28 +547,3 @@ class PlayerSearchDialog(QDialog):
         self.search_button.setEnabled(True)
         self.search_button.setText("検索")
         self.result.setText(message)
-
-    # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
-    def set_checking(self) -> None:
-        self.check_button.setEnabled(False)
-        self.check_button.setText("確認中…")
-        self.update_status.setText("")
-
-    def set_up_to_date(self) -> None:
-        self.check_button.setEnabled(True)
-        self.check_button.setText("今すぐ確認")
-        self.update_status.setText("最新の状態です。")
-        self.update_button.setVisible(False)
-
-    def set_check_failed(self, message: str) -> None:
-        self.check_button.setEnabled(True)
-        self.check_button.setText("今すぐ確認")
-        self.update_status.setText(message)
-        self.update_button.setVisible(False)
-
-    def set_update_available(self, tag: str) -> None:
-        self.check_button.setEnabled(True)
-        self.check_button.setText("今すぐ確認")
-        self.update_status.setText(f"{tag} が利用できます。")
-        self.update_button.setText(f"{tag} に更新")
-        self.update_button.setVisible(True)
