@@ -12,7 +12,7 @@ from . import diagnostics
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
-from .riot import api, auth, autologin, content, launcher, localapi, process, session, status
+from .riot import api, auth, autologin, content, henrik, launcher, localapi, process, session, status
 
 Progress = Callable[[str], None]
 
@@ -102,6 +102,7 @@ SETTING_DISCORD_MENTION = "discord_mention"
 SETTING_LOGIN_STEP_DELAY = "login_step_delay"
 DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
+SETTING_HENRIK_API_KEY = "henrik_api_key"
 
 
 class AccountService:
@@ -150,6 +151,21 @@ class AccountService:
         settings = self.vault.settings()
         settings[SETTING_DISCORD_MENTION] = value.strip()
         self.vault.save_settings(settings)
+
+    @property
+    def henrik_api_key(self) -> str:
+        """他プレイヤー検索 (HenrikDev API) に使うキー。無ければ検索不可。"""
+        return str(self.vault.settings().get(SETTING_HENRIK_API_KEY, ""))
+
+    @henrik_api_key.setter
+    def henrik_api_key(self, value: str) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_HENRIK_API_KEY] = value.strip()
+        self.vault.save_settings(settings)
+
+    def search_player(self, riot_id: str) -> tuple[henrik.PlayerAccount, henrik.PlayerRank]:
+        """Name#TAG で任意のプレイヤーのレベル・ランクを検索する (HenrikDev API)。"""
+        return henrik.search(riot_id, self.henrik_api_key)
 
     @property
     def login_step_delay(self) -> float:

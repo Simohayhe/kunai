@@ -22,7 +22,7 @@ from ..version import __version__
 from . import theme, workers
 from .account_card import AccountCard
 from .detail_panel import DetailPanel
-from .dialogs import AccountDialog, SettingsDialog
+from .dialogs import AccountDialog, PlayerSearchDialog, SettingsDialog
 from .icons import IconLoader
 
 STATUS_CHECK_INTERVAL_MS = 120_000
@@ -151,6 +151,12 @@ class MainWindow(QMainWindow):
         self.refresh_all_button.setObjectName("Ghost")
         self.refresh_all_button.clicked.connect(self.refresh_all)
         layout.addWidget(self.refresh_all_button)
+
+        self.search_button = QPushButton("プレイヤー検索")
+        self.search_button.setObjectName("Ghost")
+        self.search_button.setToolTip("Riot ID で他プレイヤーのレベル・ランクを検索 (要 HenrikDev API キー)")
+        self.search_button.clicked.connect(self.open_player_search)
+        layout.addWidget(self.search_button)
 
         self.settings_button = QPushButton("設定")
         self.settings_button.setObjectName("Ghost")
@@ -457,6 +463,7 @@ class MainWindow(QMainWindow):
             mention=self.service.discord_mention,
             step_delay=self.service.login_step_delay,
             stay_signed_in=self.service.stay_signed_in,
+            henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
             parent=self,
         )
@@ -469,7 +476,24 @@ class MainWindow(QMainWindow):
             self.service.discord_mention = dialog.mention_text()
             self.service.login_step_delay = dialog.step_delay()
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
+            self.service.henrik_api_key = dialog.henrik_api_key()
             self.status.showMessage("設定を保存しました", 4000)
+
+    def open_player_search(self) -> None:
+        dialog = PlayerSearchDialog(parent=self)
+        dialog.search_button.clicked.connect(lambda: self._run_player_search(dialog))
+        dialog.exec()
+
+    def _run_player_search(self, dialog: PlayerSearchDialog) -> None:
+        riot_id = dialog.query()
+        if not riot_id:
+            return
+        dialog.set_searching()
+        workers.run(
+            self.service.search_player, riot_id,
+            on_done=lambda result: dialog.set_result(*result),
+            on_error=dialog.set_error,
+        )
 
     # ==================================================================
     # 自動更新

@@ -317,7 +317,8 @@ class SettingsDialog(QDialog):
     """
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
-                stay_signed_in: bool, current_version: str, parent=None):
+                stay_signed_in: bool, henrik_api_key: str, current_version: str,
+                parent=None):
         super().__init__(parent)
         self.setWindowTitle("設定")
         self.setMinimumWidth(460)
@@ -389,6 +390,28 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
+        # -- プレイヤー検索 ---------------------------------------------
+        search_title = QLabel("プレイヤー検索")
+        search_title.setObjectName("SectionTitle")
+        layout.addWidget(search_title)
+
+        search_desc = QLabel(
+            "他プレイヤーを Riot ID で検索するには、外部の HenrikDev API の"
+            "キーが要ります。"
+            "https://api.henrikdev.xyz/dashboard/ で無料で発行できます。"
+        )
+        search_desc.setObjectName("SubTitle")
+        search_desc.setWordWrap(True)
+        layout.addWidget(search_desc)
+
+        search_form = QFormLayout()
+        search_form.setSpacing(9)
+        self.henrik_key = QLineEdit(henrik_api_key)
+        self.henrik_key.setPlaceholderText("HenrikDev API キー (任意)")
+        self.henrik_key.setEchoMode(QLineEdit.Password)
+        search_form.addRow("APIキー", self.henrik_key)
+        layout.addLayout(search_form)
+
         # -- 更新 ---------------------------------------------------
         update_title = QLabel("ソフトの更新")
         update_title.setObjectName("SectionTitle")
@@ -427,11 +450,78 @@ class SettingsDialog(QDialog):
     def mention_text(self) -> str:
         return self.mention.text().strip()
 
+    def henrik_api_key(self) -> str:
+        return self.henrik_key.text().strip()
+
     def step_delay(self) -> float:
         return self.delay.value()
 
     def stay_signed_in_enabled(self) -> bool:
         return self.stay_signed_in.isChecked()
+
+
+class PlayerSearchDialog(QDialog):
+    """Riot ID (Name#TAG) で他プレイヤーのレベル・ランクを検索する (HenrikDev API)。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("プレイヤー検索")
+        self.setMinimumWidth(420)
+        self.setStyleSheet(theme.STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(13)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        title = QLabel("プレイヤー検索")
+        title.setObjectName("Title")
+        layout.addWidget(title)
+
+        row = QHBoxLayout()
+        row.setSpacing(9)
+        self.riot_id = QLineEdit()
+        self.riot_id.setPlaceholderText("Name#TAG")
+        row.addWidget(self.riot_id, 1)
+        self.search_button = QPushButton("検索")
+        self.search_button.setObjectName("Primary")
+        row.addWidget(self.search_button)
+        layout.addLayout(row)
+        self.riot_id.returnPressed.connect(self.search_button.click)
+
+        self.result = QLabel()
+        self.result.setObjectName("SubTitle")
+        self.result.setWordWrap(True)
+        self.result.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.result.setTextFormat(Qt.RichText)
+        layout.addWidget(self.result, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def query(self) -> str:
+        return self.riot_id.text().strip()
+
+    def set_searching(self) -> None:
+        self.search_button.setEnabled(False)
+        self.search_button.setText("検索中…")
+        self.result.setText("")
+
+    def set_result(self, account, rank) -> None:
+        self.search_button.setEnabled(True)
+        self.search_button.setText("検索")
+        self.result.setText(
+            f"<span style='font-size:16px; font-weight:700;'>{account.riot_id}</span><br>"
+            f"レベル {account.account_level}　・　リージョン {account.region.upper()}"
+            "<br><br>"
+            f"<span style='font-size:15px; font-weight:700;'>{rank.tier_name}</span>"
+            f"　{rank.rr} RR"
+        )
+
+    def set_error(self, message: str) -> None:
+        self.search_button.setEnabled(True)
+        self.search_button.setText("検索")
+        self.result.setText(message)
 
     # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
     def set_checking(self) -> None:
