@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import webbrowser
 
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
         self._pending_release: updater.Release | None = None
         self._update_check_token: object | None = None
         self._switch_cancelled = False
+        self._switch_token: object | None = None
+        self._switch_cancel_event: threading.Event | None = None
         self._auto_refreshing = False
 
         self.setWindowTitle("Kunai")
@@ -741,41 +744,56 @@ class MainWindow(QMainWindow):
         if not account or self._busy:
             return
         self._switch_cancelled = False
+        token = object()
+        self._switch_token = token
+        self._switch_cancel_event = threading.Event()
         self._set_busy(True, f"{account.display_name} に切り替えています…")
         self.cancel_switch_button.setEnabled(True)
         self.cancel_switch_button.setVisible(True)
         workers.run(
             self.service.switch, account,
-            launch_game=True, force=force,
-            on_done=self._on_switched,
-            on_error=lambda m: self._on_switch_failed(account_id, m),
-            on_progress=self.status.showMessage,
+            launch_game=True, force=force, cancel_event=self._switch_cancel_event,
+            on_done=lambda result: self._on_switched(result, token),
+            on_error=lambda m: self._on_switch_failed(account_id, m, token),
+            on_progress=lambda m: self._on_switch_progress(m, token),
         )
 
+    def _on_switch_progress(self, message: str, token: object) -> None:
+        if self._switch_token is token:
+            self.status.showMessage(message)
+
     def cancel_switch(self) -> None:
-        """切り替え処理を中止する。Riot Client を強制終了するだけの単純な中止。
+        """切り替え処理を中止する。
 
         switch() は複数の待ち処理をまたぐ一続きの関数で、途中から安全に
-        抜けさせるのは難しい。Riot Client を落とせば、待っている処理
-        (ウィンドウ待ち・ログイン確認待ちなど) はどのみち見つからず
-        自然に失敗して戻ってくるので、それを「キャンセルした」結果として扱う。
+        抜けさせるのは難しいため、cancel_event を立てて各待ちループに
+        自分で気づいて抜けてもらう作りにしてある (service.switch 側)。
+
+        ここではそれに加えて、UI 側は結果を待たずに即座に操作を戻す。
+        そうしないと「キャンセルしたのに次の切り替えがすぐ押せない」
+        ことになる。_switch_token を捨てるので、古いタスクが遅れて
+        on_done / on_error を呼んでも (_switch_token is not token) で
+        弾かれ、今の操作と混ざらない。
         """
         if not self._busy or self._switch_cancelled:
             return
         self._switch_cancelled = True
-        self.cancel_switch_button.setEnabled(False)
-        self.status.showMessage("キャンセルしています…")
+        self._switch_token = None
+        if self._switch_cancel_event is not None:
+            self._switch_cancel_event.set()
+        self.cancel_switch_button.setVisible(False)
+        self._set_busy(False, "キャンセルしました")
+        # Riot Client がまだ待ち処理をしているかもしれないので、念のため落としておく。
         # stop_all は終了を粘り強く待つため最大 8 秒かかりうる。UI を固めないよう別スレッドで。
         workers.run(
             riot_process.stop_all,
             on_error=lambda m: diagnostics.log(f"キャンセル時の強制終了に失敗: {m}"),
         )
 
-    def _on_switch_failed(self, account_id: str, message: str) -> None:
+    def _on_switch_failed(self, account_id: str, message: str, token: object) -> None:
+        if self._switch_token is not token:
+            return  # キャンセル済みで無視することにしたタスクの、遅れて来た結果
         self.cancel_switch_button.setVisible(False)
-        if self._switch_cancelled:
-            self._set_busy(False, "切り替えをキャンセルしました")
-            return
         self._set_busy(False)
         if "起動中" in message:
             answer = QMessageBox.question(
@@ -788,7 +806,9 @@ class MainWindow(QMainWindow):
             return
         self._error("切り替えに失敗しました", message)
 
-    def _on_switched(self, result) -> None:
+    def _on_switched(self, result, token: object) -> None:
+        if self._switch_token is not token:
+            return  # キャンセル済みで無視することにしたタスクの、遅れて来た結果
         self.cancel_switch_button.setVisible(False)
         account = self.vault.get(result.account_id)
         name = account.display_name if account else "アカウント"

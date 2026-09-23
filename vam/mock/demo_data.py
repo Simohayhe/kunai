@@ -14,19 +14,19 @@ from ..storage import Vault
 from .fake_riot import session_yaml
 
 SAMPLES = [
-    dict(label="メイン", riot_id="Simohaya#JP1", region="ap", color="#ff4655",
+    dict(label="メイン", riot_id="DemoMain#001", region="ap", color="#ff4655",
          favorite=True, tier=21, tier_name="アセンダント 1", rr=64, wins=38, games=71,
          peak=22, peak_name="アセンダント 2", vp=1275, rp=40, kc=8600,
          skins=142, agents=24, used_ago=1800, session_days=30),
-    dict(label="サブ（練習用）", riot_id="Sub#0001", region="ap", color="#0fd8c2",
+    dict(label="サブ1", riot_id="DemoSub1#002", region="ap", color="#0fd8c2",
          tier=15, tier_name="プラチナ 1", rr=31, wins=12, games=27,
          peak=16, peak_name="プラチナ 2", vp=0, rp=10, kc=1200,
          skins=23, agents=19, used_ago=86400 * 3, session_days=30),
-    dict(label="スマーフ", riot_id="Smurf#JP2", region="ap", color="#a05fd0",
+    dict(label="サブ2", riot_id="DemoSub2#003", region="ap", color="#a05fd0",
          tier=9, tier_name="シルバー 1", rr=88, wins=5, games=8,
          peak=12, peak_name="ゴールド 1", vp=350, rp=0, kc=400,
          skins=4, agents=11, used_ago=86400 * 12, session_days=2),
-    dict(label="NA 検証用", riot_id="NaTest#NA1", region="na", color="#f0a53a",
+    dict(label="サブ3", riot_id="DemoSub3#004", region="na", color="#f0a53a",
          tier=0, tier_name="Unranked", rr=0, wins=0, games=0,
          peak=0, peak_name="", vp=0, rp=0, kc=0,
          skins=0, agents=6, used_ago=0, session_days=0),
@@ -62,7 +62,7 @@ def seed(vault: Vault) -> list[Account]:
     created = []
     for i, d in enumerate(SAMPLES):
         account = Account(
-            label=d["label"], riot_id=d["riot_id"], region=d["region"],
+            label=d["label"], label_linked=False, riot_id=d["riot_id"], region=d["region"],
             color=d["color"], favorite=d.get("favorite", False),
             puuid=FIRST_PUUID if i == 0 else _puuid(i),
             username=f"demo_user{i}",

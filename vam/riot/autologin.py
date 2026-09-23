@@ -225,18 +225,24 @@ LOADED_MIN_WIDTH = 800
 
 def wait_for_login_window(timeout: float = 120.0,
                           min_width: int = LOADED_MIN_WIDTH,
-                          stable_for: float = 0.8) -> Window:
+                          stable_for: float = 0.8,
+                          cancel_event=None) -> Window:
     """ログイン画面が「出来上がる」まで待つ。
 
     起動直後はスプラッシュ (600x600 程度) が出て、読み込みが終わると
     ウィンドウが作り直される。古いハンドルを掴んだままだと無効になるので、
     毎回取り直し、十分な大きさで一定時間安定してから返す。
+
+    cancel_event が立ったら、タイムアウトを待たずすぐに諦める。
+    キャンセル直後に別アカウントで即座に切り替え直せるようにするため。
     """
     deadline = time.time() + timeout
     stable_since: float | None = None
     last_size: tuple[int, int] | None = None
 
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise AutoLoginError("キャンセルされました")
         w = find_login_window()
         if w and w.width >= min_width:
             size = (w.width, w.height)
@@ -518,7 +524,7 @@ def ensure_active(window: Window, attempts: int = 3) -> bool:
     return is_active(window)
 
 
-def wait_for_login_form(window: Window, timeout: float = 60.0) -> Window | None:
+def wait_for_login_form(window: Window, timeout: float = 60.0, cancel_event=None) -> Window | None:
     """ログインフォームが実際に描画されるまで待つ。
 
     ウィンドウの大きさだけを見ていると、読み込み画面のうちに
@@ -540,6 +546,8 @@ def wait_for_login_form(window: Window, timeout: float = 60.0) -> Window | None:
     ready = 0
     current = window
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if not is_alive(current):
             fresh = find_login_window()
             if not fresh:
@@ -567,7 +575,7 @@ def wait_for_login_form(window: Window, timeout: float = 60.0) -> Window | None:
 
 def perform_login(username: str, password: str, window: Window | None = None,
                   submit: bool = True, settle: float = 0.5,
-                  stay_signed_in: bool = False) -> dict:
+                  stay_signed_in: bool = False, cancel_event=None) -> dict:
     """ログイン画面にユーザー名とパスワードを打ち込み、サインインする。
 
     ユーザー名 → Tab → パスワード → (「サインイン状態を維持」) → Enter。
@@ -582,13 +590,17 @@ def perform_login(username: str, password: str, window: Window | None = None,
     """
     if not username or not password:
         raise AutoLoginError("ユーザー名とパスワードの両方が必要です")
+    if cancel_event is not None and cancel_event.is_set():
+        raise AutoLoginError("キャンセルされました")
 
-    w = window or wait_for_login_window()
+    w = window or wait_for_login_window(cancel_event=cancel_event)
     focus(w)
     # ウィンドウが作り直されてハンドルが無効になっていることがあるので、
     # ここで見つかった (生きている) ウィンドウを以降すべてに使う。
-    w = wait_for_login_form(w)
+    w = wait_for_login_form(w, cancel_event=cancel_event)
     if w is None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise AutoLoginError("キャンセルされました")
         raise AutoLoginError(
             "ログインフォームが表示されませんでした。"
             "Riot Client の画面を確認してください。"

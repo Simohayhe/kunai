@@ -758,7 +758,7 @@ def test_ui() -> None:
 
         # 検索。ウィンドウ自体を表示していないので isHidden で判定する
         shown = lambda: [c for c in window.cards.values() if not c.isHidden()]
-        window.search.setText("スマーフ")
+        window.search.setText("サブ2")
         check("検索で絞り込む", len(shown()) == 1, str(len(shown())))
         window.search.setText("アセンダント")     # ランク名でも引ける
         check("ランク名で検索", len(shown()) == 1, str(len(shown())))
@@ -768,7 +768,7 @@ def test_ui() -> None:
         check("検索クリアで全件", len(shown()) == 4, str(len(shown())))
 
         # 選択と切り替え可否
-        target = [a for a in vault.accounts() if a.label == "NA 検証用"][0]
+        target = [a for a in vault.accounts() if a.label == "サブ3"][0]
         window.select_account(target.id)
         check("セッション無しは起動不可", not window.switch_button.isEnabled())
         main_acc = [a for a in vault.accounts() if a.label == "メイン"][0]

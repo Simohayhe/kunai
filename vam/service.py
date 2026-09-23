@@ -300,10 +300,10 @@ class AccountService:
         return account
 
     def wait_for_login(self, account: Account, timeout: float = 90.0,
-                       progress: Progress = _noop) -> str:
+                       progress: Progress = _noop, cancel_event=None) -> str:
         """復元したセッションが通るかを見届ける。
 
-        返り値は "ok" / "rejected" / "timeout"。
+        返り値は "ok" / "rejected" / "timeout" / "cancelled"。
 
         成功を待つだけだと、失効していた場合に必ずタイムアウト分だけ
         待たされる。クライアントはトークンを拒否するとセッションファイルを
@@ -316,6 +316,8 @@ class AccountService:
         deadline = time.time() + timeout
         gone = 0
         while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return "cancelled"
             client = localapi.LocalClient()
             if client.available:
                 try:
@@ -335,7 +337,7 @@ class AccountService:
         return "timeout"
 
     def wait_and_capture(self, account: Account, timeout: float = 60.0,
-                         progress: Progress = _noop) -> bool:
+                         progress: Progress = _noop, cancel_event=None) -> bool:
         """切り替え後、クライアントがログインし終えてから取り込み直す。
 
         起動時にトークンが更新されるので、そのあとの状態を保存しないと
@@ -352,6 +354,8 @@ class AccountService:
         deadline = time.time() + timeout
         progress(f"{account.display_name}: ログイン完了を待っています…")
         while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             client = localapi.LocalClient()
             if client.available:
                 try:
@@ -375,7 +379,7 @@ class AccountService:
     def switch(self, account: Account, launch_game: bool = True,
                force: bool = False, allow_autologin: bool = True,
                submit_login: bool = True, recapture: bool = True,
-               progress: Progress = _noop) -> SwitchResult:
+               progress: Progress = _noop, cancel_event=None) -> SwitchResult:
         # 進捗はログにも残す。固まったときにどこまで来たか分かるように。
         _ui_progress = progress
 
@@ -444,7 +448,9 @@ class AccountService:
             # 復元したトークンが Riot 側で失効していることがある。
             # ファイル上は正しく見えるので、実際に通るか試すまで分からない。
             # 通らなければクライアントはセッションを消してログイン画面に戻る。
-            outcome = self.wait_for_login(account, progress=progress)
+            outcome = self.wait_for_login(account, progress=progress, cancel_event=cancel_event)
+            if outcome == "cancelled":
+                raise ServiceError("キャンセルされました")
             if outcome == "ok":
                 progress(f"{account.display_name}: ログインを確認しました")
                 self.capture_into(account)
@@ -478,13 +484,14 @@ class AccountService:
         if method == "autologin":
             progress("ログイン画面を待っています…")
             try:
-                window = autologin.wait_for_login_window(timeout=120)
+                window = autologin.wait_for_login_window(timeout=120, cancel_event=cancel_event)
                 progress("ログイン情報を入力中…")
                 outcome = autologin.perform_login(
                     account.username, account.password,
                     window=window, submit=submit_login,
                     stay_signed_in=self.stay_signed_in,
                     settle=self.login_step_delay,
+                    cancel_event=cancel_event,
                 )
                 # stay_signed_in=None は「触っていない」という既定の状態。
                 # 毎回警告に出すとノイズにしかならないので黙っておく。
@@ -506,6 +513,8 @@ class AccountService:
                         "サインインはご自身で押してください。"
                     )
             except autologin.AutoLoginError as exc:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ServiceError("キャンセルされました") from exc
                 warnings.append(f"自動入力に失敗しました: {exc}")
 
         account.last_used_at = time.time()
@@ -516,8 +525,11 @@ class AccountService:
         # クライアントは起動やログインのたび refresh_token を更新するので、
         # ここで取り込まないと保管庫のコピーが一世代古いままになり、
         # 次回の切り替えで Riot に拒否される。
+        if cancel_event is not None and cancel_event.is_set():
+            raise ServiceError("キャンセルされました")
+
         if launched and recapture:
-            if not self.wait_and_capture(account, progress=progress):
+            if not self.wait_and_capture(account, progress=progress, cancel_event=cancel_event):
                 warnings.append(
                     "ログイン後のセッションを取り込めませんでした。"
                     "次回このアカウントに切り替えられない可能性があります。"
