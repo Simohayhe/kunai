@@ -709,23 +709,26 @@ def test_inventory_summary() -> None:
     vault.initialize()
     svc = AccountService(vault)
     try:
-        levels = list(svc.content.skin_levels().keys())
+        weapons = svc.content.weapons()
     except ContentError as exc:
         print(f"  [skip] ネットワーク不可のため省略: {exc}")
         return
 
+    # 複数の武器にまたがるよう、武器ごとに数枚ずつ levels を集める
+    levels: list[str] = []
+    for w in weapons.values():
+        for skin in list(w["skins"].values())[:3]:
+            levels.extend(skin["levels"][:1])
+
     account = vault.add(Account(
         label="所持テスト",
-        inventory=InventoryInfo(skin_level_ids=levels[:60], agent_ids=["a"] * 5),
+        inventory=InventoryInfo(skin_level_ids=levels),
     ))
-    summary = svc.summarize_inventory(account)
-    check("スキンを名前に解決", summary["skin_count"] > 0, str(summary["skin_count"]))
-    check("レア度で分類", len(summary["by_tier"]) > 0)
-    check("名前が入っている", all(s["name"] for s in summary["skins"]))
-    check("レア度順に並ぶ",
-          [s["tier_rank"] for s in summary["skins"]]
-          == sorted([s["tier_rank"] for s in summary["skins"]], reverse=True))
-    check("エージェント総数", summary["agent_total"] > 20)
+    groups = svc.weapon_inventory(account)
+    check("武器ごとに分かれる", len(groups) > 1, str(len(groups)))
+    check("名前が入っている", all(s.name for g in groups for s in g.skins))
+    check("所持数の多い順", [g.count for g in groups] == sorted([g.count for g in groups], reverse=True))
+    check("武器名にスキンが紐づく", all(g.name for g in groups))
 
 
 def test_ui() -> None:

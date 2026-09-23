@@ -140,6 +140,32 @@ class ContentCache:
         except ContentError:
             return {}
 
+    def weapons(self) -> dict[str, dict]:
+        """weapon uuid -> {name, icon, category, skins: {skin uuid -> {name, tier, icon, levels[]}}}
+
+        /weapons はスキンを武器ごとに内包して返すので、これ 1 本で
+        「この武器が持つスキン一覧」が引ける (別途 /weapons/skins を
+        合わせる必要が無い)。
+        """
+        data = self.fetch("weapons", "/weapons") or []
+        out = {}
+        for w in data:
+            skins = {}
+            for s in w.get("skins", []):
+                skins[s["uuid"]] = {
+                    "name": s.get("displayName", ""),
+                    "tier": s.get("contentTierUuid") or "",
+                    "icon": s.get("displayIcon"),
+                    "levels": [lv["uuid"] for lv in (s.get("levels") or [])],
+                }
+            out[w["uuid"]] = {
+                "name": w.get("displayName", ""),
+                "icon": w.get("displayIcon"),
+                "category": w.get("category", ""),
+                "skins": skins,
+            }
+        return out
+
     def skin_level_to_skin(self) -> dict[str, str]:
         """skinLevel uuid -> skin uuid。所持品からレア度を数えるための逆引き。"""
         mapping = {}

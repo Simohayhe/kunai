@@ -929,8 +929,8 @@ class MainWindow(QMainWindow):
             return
         self.detail.inventory.set_message("集計中…")
         workers.run(
-            self.service.summarize_inventory, account,
-            on_done=self.detail.inventory.set_summary,
+            self.service.weapon_inventory, account,
+            on_done=self.detail.inventory.set_groups,
             on_error=lambda m: self.detail.inventory.set_message(m),
         )
 

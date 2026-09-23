@@ -74,6 +74,27 @@ class MatchStats:
         return (self.wins / self.games * 100) if self.games else 0.0
 
 
+@dataclass
+class WeaponSkin:
+    name: str
+    icon: str | None = None
+    tier_name: str = "スタンダード"
+    tier_color: str = "#8b8b8b"
+
+
+@dataclass
+class WeaponGroup:
+    weapon_id: str
+    name: str
+    icon: str | None = None
+    category: str = ""
+    skins: list[WeaponSkin] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.skins)
+
+
 # 設定キー。settings.json に平文で置く (機密ではない)
 SETTING_STAY_SIGNED_IN = "stay_signed_in"
 SETTING_DISCORD_WEBHOOK = "discord_webhook_url"
@@ -873,47 +894,48 @@ class AccountService:
         return stats
 
     # -- 所持品の集計 -------------------------------------------------------
-    def summarize_inventory(self, account: Account) -> dict:
-        """所持スキンをレア度ごとに数え、名前付きの一覧を作る。"""
+    def weapon_inventory(self, account: Account) -> list[WeaponGroup]:
+        """所持スキンを武器 (ナイフ含む) ごとにまとめる。
+
+        /weapons はスキンを武器ごとに内包して返すので、それをそのまま
+        「この武器にはこのスキンがある」の一覧として使う。スキンを1つも
+        持っていない武器は出さない。表示順は所持数が多い武器から。
+        """
         try:
-            levels = self.content.skin_levels()
-            skins = self.content.skins()
+            weapons = self.content.weapons()
             tiers = self.content.content_tiers()
-            level_to_skin = self.content.skin_level_to_skin()
         except content.ContentError as exc:
             raise ServiceError(str(exc)) from exc
 
-        owned_skins: dict[str, dict] = {}
-        for level_id in account.inventory.skin_level_ids:
-            skin_id = level_to_skin.get(level_id)
-            if not skin_id or skin_id in owned_skins:
-                continue
-            skin = skins.get(skin_id)
-            if not skin:
-                continue
-            tier = tiers.get(skin["tier"], {})
-            owned_skins[skin_id] = {
-                "name": skin["name"],
-                "icon": levels.get(level_id, {}).get("icon") or skin["icon"],
-                "tier_name": tier.get("name", "スタンダード"),
-                "tier_rank": tier.get("rank", -1),
-                "tier_color": tier.get("color", "#8b8b8b"),
-            }
+        level_to_ref: dict[str, tuple[str, str]] = {}
+        for weapon_id, w in weapons.items():
+            for skin_id, skin in w["skins"].items():
+                for level_id in skin["levels"]:
+                    level_to_ref[level_id] = (weapon_id, skin_id)
 
-        by_tier: dict[str, int] = {}
-        for s in owned_skins.values():
-            by_tier[s["tier_name"]] = by_tier.get(s["tier_name"], 0) + 1
-
-        agents = self.content.agents()
-        return {
-            "skins": sorted(owned_skins.values(),
-                            key=lambda s: (-s["tier_rank"], s["name"])),
-            "skin_count": len(owned_skins),
-            "by_tier": by_tier,
-            "agent_count": len(account.inventory.agent_ids),
-            "agent_total": len(agents),
-            "buddy_count": len(account.inventory.buddy_ids),
-            "card_count": len(account.inventory.card_ids),
-            "title_count": len(account.inventory.title_ids),
-            "spray_count": len(account.inventory.spray_ids),
+        groups = {
+            weapon_id: WeaponGroup(weapon_id=weapon_id, name=w["name"],
+                                   icon=w["icon"], category=w["category"])
+            for weapon_id, w in weapons.items()
         }
+
+        seen: set[tuple[str, str]] = set()
+        for level_id in account.inventory.skin_level_ids:
+            ref = level_to_ref.get(level_id)
+            if not ref or ref in seen:
+                continue
+            seen.add(ref)
+            weapon_id, skin_id = ref
+            skin = weapons[weapon_id]["skins"][skin_id]
+            tier = tiers.get(skin["tier"], {})
+            groups[weapon_id].skins.append(WeaponSkin(
+                name=skin["name"], icon=skin["icon"],
+                tier_name=tier.get("name", "スタンダード"),
+                tier_color=tier.get("color", "#8b8b8b"),
+            ))
+
+        result = [g for g in groups.values() if g.skins]
+        result.sort(key=lambda g: (-g.count, g.name))
+        for g in result:
+            g.skins.sort(key=lambda s: s.name)
+        return result

@@ -153,12 +153,13 @@ def main() -> int:
     step("7. 所持品の名前解決")
     try:
         account = svc.refresh(account, fetch_inventory=True)
-        summary = svc.summarize_inventory(account)
-        print(f"{OK}所持スキン {summary['skin_count']} 種類 / "
-              f"エージェント {summary['agent_count']}/{summary['agent_total']}")
-        print(f"      レア度別: {summary['by_tier']}")
-        for s in summary["skins"][:5]:
-            print(f"        {s['tier_name']:16} {s['name']}")
+        groups = svc.weapon_inventory(account)
+        total = sum(g.count for g in groups)
+        print(f"{OK}所持スキン {total} 種類 / 武器 {len(groups)} 種")
+        for g in groups[:5]:
+            print(f"        {g.name} ({g.count})")
+            for s in g.skins[:2]:
+                print(f"          {s.tier_name:16} {s.name}")
     except Exception as exc:
         print(f"{NG}{type(exc).__name__}: {exc}")
 

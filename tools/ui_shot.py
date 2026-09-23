@@ -38,11 +38,12 @@ def main() -> int:
 
     def capture():
         # 戦績と所持品を実際に埋めてから撮る
-        window._on_history(sample_matches())
-        summary = window.service.summarize_inventory(
+        from vam.service import MatchStats
+        window._on_history(MatchStats(matches=sample_matches()))
+        groups = window.service.weapon_inventory(
             window.vault.get(window.selected_id)
         )
-        window.detail.inventory.set_summary(summary)
+        window.detail.inventory.set_groups(groups)
 
         # 概要・戦績・所持品を順に撮る
         for index, suffix in enumerate(("overview", "history", "inventory")):

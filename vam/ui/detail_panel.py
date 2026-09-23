@@ -346,16 +346,21 @@ class HistoryTab(QWidget):
 
 
 class InventoryTab(QWidget):
+    """武器スキン (ナイフ含む) を武器ごとに絞り込んで見る。"""
     reload_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._groups: list = []
+        self._selected_weapon_id: str | None = None
+        self._weapon_buttons: dict[str, QPushButton] = {}
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 16, 0, 0)
         layout.setSpacing(10)
 
         top = QHBoxLayout()
-        title = QLabel("所持品")
+        title = QLabel("所持品（武器スキン）")
         title.setObjectName("SectionTitle")
         top.addWidget(title)
         top.addStretch(1)
@@ -364,9 +369,18 @@ class InventoryTab(QWidget):
         top.addWidget(self.reload)
         layout.addLayout(top)
 
-        self.tiles = QGridLayout()
-        self.tiles.setSpacing(9)
-        layout.addLayout(self.tiles)
+        self.weapon_scroll = QScrollArea()
+        self.weapon_scroll.setWidgetResizable(True)
+        self.weapon_scroll.setFixedHeight(46)
+        self.weapon_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.weapon_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        weapon_container = QWidget()
+        self.weapon_row = QHBoxLayout(weapon_container)
+        self.weapon_row.setContentsMargins(0, 0, 0, 0)
+        self.weapon_row.setSpacing(6)
+        self.weapon_row.addStretch(1)
+        self.weapon_scroll.setWidget(weapon_container)
+        layout.addWidget(self.weapon_scroll)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -380,9 +394,10 @@ class InventoryTab(QWidget):
 
         self.set_message("「集計する」で所持スキンを一覧にします")
 
-    def _clear_grid(self) -> None:
-        while self.tiles.count():
-            item = self.tiles.takeAt(0)
+    def _clear_weapon_chips(self) -> None:
+        self._weapon_buttons.clear()
+        while self.weapon_row.count() > 1:
+            item = self.weapon_row.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
@@ -393,6 +408,9 @@ class InventoryTab(QWidget):
                 item.widget().deleteLater()
 
     def set_message(self, text: str) -> None:
+        self._clear_weapon_chips()
+        self.weapon_scroll.setVisible(False)
+        self._groups = []
         self.clear()
         msg = QLabel(text)
         msg.setObjectName("SubTitle")
@@ -400,41 +418,51 @@ class InventoryTab(QWidget):
         msg.setWordWrap(True)
         self.rows.insertWidget(0, msg)
 
-    def set_summary(self, summary: dict) -> None:
-        self._clear_grid()
-        tiles = [
-            ("所持スキン", str(summary["skin_count"])),
-            ("エージェント", f"{summary['agent_count']} / {summary['agent_total']}"),
-            ("ガンバディー", str(summary["buddy_count"])),
-            ("カード", str(summary["card_count"])),
-            ("タイトル", str(summary["title_count"])),
-            ("スプレー", str(summary["spray_count"])),
-        ]
-        for i, t in enumerate(tiles):
-            self.tiles.addWidget(_stat_tile(*t), i // 3, i % 3)
+    def set_groups(self, groups: list) -> None:
+        """武器ごとの所持スキン一覧を受け取り、武器チップと初期表示を作る。"""
+        self._groups = groups
+        self._clear_weapon_chips()
+        if not groups:
+            self.set_message("武器スキンを所持していません")
+            return
 
+        self.weapon_scroll.setVisible(True)
+        for g in groups:
+            btn = QPushButton(f"{g.name} ({g.count})")
+            btn.setObjectName("Ghost")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked, wid=g.weapon_id: self.select_weapon(wid))
+            self.weapon_row.insertWidget(self.weapon_row.count() - 1, btn)
+            self._weapon_buttons[g.weapon_id] = btn
+
+        self.select_weapon(groups[0].weapon_id)
+
+    def select_weapon(self, weapon_id: str) -> None:
+        self._selected_weapon_id = weapon_id
+        for wid, btn in self._weapon_buttons.items():
+            btn.setChecked(wid == weapon_id)
+            btn.setStyleSheet(
+                f"background:{theme.ACCENT}; border-color:{theme.ACCENT}; color:#ffffff;"
+                if wid == weapon_id else ""
+            )
+
+        group = next((g for g in self._groups if g.weapon_id == weapon_id), None)
         self.clear()
-        by_tier = summary["by_tier"]
-        if by_tier:
-            chips = QFrame()
-            chips.setStyleSheet("border:none;")
-            row = QHBoxLayout(chips)
-            row.setContentsMargins(0, 4, 0, 4)
-            row.setSpacing(7)
-            for name, count in sorted(by_tier.items(), key=lambda kv: -kv[1]):
-                chip = QLabel(f"{name}  {count}")
-                chip.setStyleSheet(
-                    f"color:{theme.TEXT_DIM}; border:1px solid {theme.BORDER};"
-                    "border-radius:10px; padding:3px 10px; font-size:11px;"
-                )
-                row.addWidget(chip)
-            row.addStretch(1)
-            self.rows.insertWidget(0, chips)
-
-        for skin in summary["skins"]:
+        if not group or not group.skins:
+            self.rows.insertWidget(0, self._center_label("このカテゴリのスキンはありません"))
+            return
+        for skin in group.skins:
             self.rows.insertWidget(self.rows.count() - 1, self._skin_row(skin))
 
-    def _skin_row(self, skin: dict) -> QFrame:
+    @staticmethod
+    def _center_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("SubTitle")
+        label.setAlignment(Qt.AlignCenter)
+        label.setWordWrap(True)
+        return label
+
+    def _skin_row(self, skin) -> QFrame:
         row = QFrame()
         row.setStyleSheet("QFrame { border:none; } QLabel { border:none; }")
         row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -443,15 +471,15 @@ class InventoryTab(QWidget):
         layout.setSpacing(9)
 
         dot = QLabel("●")
-        dot.setStyleSheet(f"color:{skin['tier_color']}; font-size:11px;")
+        dot.setStyleSheet(f"color:{skin.tier_color}; font-size:11px;")
         dot.setFixedWidth(14)
         layout.addWidget(dot)
 
-        name = QLabel(skin["name"])
+        name = QLabel(skin.name)
         name.setStyleSheet("font-size:12px;")
         layout.addWidget(name, 1)
 
-        tier = QLabel(skin["tier_name"])
+        tier = QLabel(skin.tier_name)
         tier.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         layout.addWidget(tier)
         return row
