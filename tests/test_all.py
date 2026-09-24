@@ -729,6 +729,33 @@ def test_inventory_summary() -> None:
     check("名前が入っている", all(s.name for g in groups for s in g.skins))
     check("所持数の多い順", [g.count for g in groups] == sorted([g.count for g in groups], reverse=True))
     check("武器名にスキンが紐づく", all(g.name for g in groups))
+    for g in groups:
+        ranks = [s.tier_rank for s in g.skins]
+        check("スキンがエディション昇順", ranks == sorted(ranks), str(ranks))
+
+
+def test_match_cache() -> None:
+    section("戦績キャッシュ")
+    from vam.match_cache import MatchCache
+    from vam.riot.api import MatchSummary
+
+    cache = MatchCache(Path(tempfile.mkdtemp()))
+    check("未取得はNone", cache.get("puuid1", "match1") is None)
+
+    summary = MatchSummary(match_id="match1", map_id="map1", character_id="agent1",
+                           won=True, kills=20, deaths=10, headshots=5,
+                           bodyshots=10, legshots=1)
+    cache.put("puuid1", summary)
+    check("保存前はファイル未作成", not cache.path.exists())
+    cache.save()
+    check("保存後はファイルができる", cache.path.exists())
+
+    reloaded = MatchCache(cache.path.parent)
+    got = reloaded.get("puuid1", "match1")
+    check("読み直しても取れる", got is not None and got.match_id == "match1")
+    check("内容が一致する", got.kills == 20 and got.won is True)
+    check("他アカウントには漏れない", reloaded.get("puuid2", "match1") is None)
+    check("別試合は別物", reloaded.get("puuid1", "match2") is None)
 
 
 def test_ui() -> None:
@@ -848,7 +875,7 @@ def main() -> int:
                test_service, test_real_file_format, test_process_isolation,
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
-               test_content, test_inventory_summary, test_ui):
+               test_content, test_inventory_summary, test_match_cache, test_ui):
         try:
             fn()
         except Exception as exc:

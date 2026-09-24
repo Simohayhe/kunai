@@ -52,6 +52,11 @@ class MainWindow(QMainWindow):
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
         # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
         self._inventory_cache: dict[str, list] = {}
+        # VALORANT (ゲーム本体) が起動中は、プレイの邪魔にならないよう
+        # バックグラウンドの通信 (ランク自動追従・障害確認) を止める。
+        # None なら自動判定、True/False ならユーザーが手動で固定している。
+        self._standby = False
+        self._standby_override: bool | None = None
 
         self.setWindowTitle("Kunai")
         self.resize(1080, 700)
@@ -143,6 +148,16 @@ class MainWindow(QMainWindow):
         version_label = QLabel(f"v{__version__}")
         version_label.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px; border:none;")
         layout.addWidget(version_label)
+
+        self.standby_button = QPushButton("モード: 自動")
+        self.standby_button.setObjectName("Ghost")
+        self.standby_button.setToolTip(
+            "VALORANT 起動中は自動でスタンバイ (バックグラウンドの通信を止めて"
+            "負荷を減らす) になります。クリックで 自動 → アクティブ固定 →"
+            " スタンバイ固定 と切り替えられます。"
+        )
+        self.standby_button.clicked.connect(self.cycle_standby_mode)
+        layout.addWidget(self.standby_button)
 
         self.update_button = QPushButton()
         self.update_button.setObjectName("Ghost")
@@ -443,17 +458,54 @@ class MainWindow(QMainWindow):
         elif info.valid:
             bits.append("ログイン中: 未登録のアカウント")
         procs = self.service.running_processes()
-        if any("VALORANT" in p for p in procs):
+        game_running = any("VALORANT" in p for p in procs)
+        if game_running:
             bits.append("ゲーム起動中")
+
+        self._apply_standby(
+            self._standby_override if self._standby_override is not None else game_running
+        )
+        if self._standby:
+            bits.append("スタンバイ")
 
         self.env_label.setText("   ·   ".join(bits))
         color = theme.OK if env.installed else theme.WARN
         self.env_label.setStyleSheet(f"color:{color}; font-size:12px; border:none;")
 
     # ==================================================================
+    # スタンバイモード (ゲーム中の負荷軽減)
+    # ==================================================================
+    def _apply_standby(self, standby: bool) -> None:
+        if standby != self._standby:
+            self._standby = standby
+            diagnostics.log("スタンバイモードへ移行" if standby else "アクティブモードへ復帰")
+        self._update_standby_button()
+
+    def cycle_standby_mode(self) -> None:
+        """自動 → アクティブ固定 → スタンバイ固定 → 自動 … と手動で切り替える。"""
+        if self._standby_override is None:
+            self._standby_override = False
+        elif self._standby_override is False:
+            self._standby_override = True
+        else:
+            self._standby_override = None
+        self.refresh_environment()
+
+    def _update_standby_button(self) -> None:
+        if self._standby_override is None:
+            label = f"モード: 自動（{'スタンバイ' if self._standby else 'アクティブ'}）"
+        elif self._standby_override:
+            label = "モード: スタンバイ固定"
+        else:
+            label = "モード: アクティブ固定"
+        self.standby_button.setText(label)
+
+    # ==================================================================
     # VALORANT のステータス (メンテナンス・障害)
     # ==================================================================
     def check_status(self) -> None:
+        if self._standby:
+            return
         workers.run(
             self.service.check_status,
             on_done=self._on_status_checked,
@@ -879,7 +931,7 @@ class MainWindow(QMainWindow):
         黙って追従させる。手動更新と違い、忙しい間は割り込まず、
         失敗してもエラーダイアログは出さない (プレイ中の邪魔をしないため)。
         """
-        if self._busy or self._auto_refreshing or not self.current_id:
+        if self._busy or self._auto_refreshing or not self.current_id or self._standby:
             return
         account = self.vault.get(self.current_id)
         if not account:

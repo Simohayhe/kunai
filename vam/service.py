@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from . import diagnostics
+from .match_cache import MatchCache
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
@@ -110,6 +111,7 @@ class AccountService:
     def __init__(self, vault: Vault):
         self.vault = vault
         self.content = content.ContentCache(vault.app_dir / "cache")
+        self.match_cache = MatchCache(vault.app_dir / "cache")
 
     @property
     def stay_signed_in(self) -> bool:
@@ -853,8 +855,10 @@ class AccountService:
                     progress: Progress = _noop) -> MatchStats:
         """HS 率・エージェント別/マップ別勝率を、直近の試合から集計する。
 
-        競技試合一覧 (1 回) に加えて、試合ごとの詳細 (roundResults の
-        ダメージ内訳が要る) を 1 件ずつ引くので、count 件数分だけ通信が増える。
+        競技試合一覧は毎回取り直す (安い、1 回の通信)。試合ごとの詳細は
+        終わった試合の内容が変わることは無いので、一度取れた分はディスクの
+        キャッシュに残し、次回はまだ持っていない (＝新しく増えた) 試合の
+        分だけ通信する。
         """
         result = self.authenticate(account)
         try:
@@ -880,11 +884,15 @@ class AccountService:
         headshots = bodyshots = legshots = 0
 
         for i, m in enumerate(matches):
-            progress(f"{account.display_name}: 試合 {i + 1}/{len(matches)} の詳細を取得中…")
-            try:
-                summary = client.match_summary(m.match_id, puuid=result.puuid)
-            except api.ApiError:
-                summary = None
+            summary = self.match_cache.get(result.puuid, m.match_id)
+            if summary is None:
+                progress(f"{account.display_name}: 試合 {i + 1}/{len(matches)} の詳細を取得中…")
+                try:
+                    summary = client.match_summary(m.match_id, puuid=result.puuid)
+                except api.ApiError:
+                    summary = None
+                if summary:
+                    self.match_cache.put(result.puuid, summary)
             if not summary:
                 continue
 
@@ -908,6 +916,7 @@ class AccountService:
         stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
         stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
         stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
+        self.match_cache.save()
         return stats
 
     # -- 所持品の集計 -------------------------------------------------------
