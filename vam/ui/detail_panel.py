@@ -209,6 +209,9 @@ class HistoryTab(QWidget):
         title = QLabel("コンペティティブ履歴")
         title.setObjectName("SectionTitle")
         top.addWidget(title)
+        self.source_label = QLabel()
+        self.source_label.setObjectName("SubTitle")
+        top.addWidget(self.source_label)
         top.addStretch(1)
         self.reload = QPushButton("更新")
         self.reload.clicked.connect(self.reload_requested.emit)
@@ -273,6 +276,9 @@ class HistoryTab(QWidget):
 
     def set_stats(self, stats) -> None:
         """HS率・エージェント別/マップ別勝率のまとめを表示する。試合が無ければ隠す。"""
+        self.source_label.setText(
+            "（API モード）" if getattr(stats, "source", "local") == "api" else "（サインインモード）"
+        )
         if not stats.games:
             self.summary.setVisible(False)
             return

@@ -51,14 +51,16 @@ def _headers(api_key: str) -> dict[str, str]:
     return {"Authorization": api_key, "Accept": "application/json"}
 
 
-def _get(path: str, api_key: str, timeout: float = 15.0) -> dict:
+def _get_raw(path: str, api_key: str, params: dict | None = None, timeout: float = 15.0):
+    """data をそのまま返す (型は呼び側次第: dict にも list にもなる)。"""
     if not api_key:
         raise HenrikError(
             "HenrikDev API キーが設定されていません。設定画面で登録してください "
             "(https://api.henrikdev.xyz/dashboard/ で発行できます)。"
         )
     try:
-        resp = requests.get(f"{BASE}{path}", headers=_headers(api_key), timeout=timeout)
+        resp = requests.get(f"{BASE}{path}", headers=_headers(api_key), params=params,
+                            timeout=timeout)
     except requests.RequestException as exc:
         raise HenrikError(f"HenrikDev API に接続できませんでした: {exc}") from exc
 
@@ -75,7 +77,11 @@ def _get(path: str, api_key: str, timeout: float = 15.0) -> dict:
         body = resp.json()
     except ValueError as exc:
         raise HenrikError("HenrikDev API の応答が JSON ではありません") from exc
-    return body.get("data") or {}
+    return body.get("data")
+
+
+def _get(path: str, api_key: str, timeout: float = 15.0) -> dict:
+    return _get_raw(path, api_key, timeout=timeout) or {}
 
 
 def find_account(name: str, tag: str, api_key: str) -> PlayerAccount:
@@ -113,3 +119,25 @@ def search(riot_id: str, api_key: str) -> tuple[PlayerAccount, PlayerRank]:
     account = find_account(name, tag, api_key)
     rank = find_rank(name, tag, account.region or "ap", api_key)
     return account, rank
+
+
+def find_matches(puuid: str, region: str, api_key: str, count: int = 20) -> list[dict]:
+    """直近のコンペティティブ試合を PUUID で引く (v4)。
+
+    サインインしていない (＝ローカル API が使えない) アカウントでも、
+    puuid さえ分かれば戦績を取得できるのがこの API を使う利点。
+    生データをそのまま返す。整形は呼び側 (service.py) でやる。
+    """
+    data = _get_raw(
+        f"/v4/by-puuid/matches/{region or 'ap'}/pc/{puuid}", api_key,
+        params={"mode": "competitive", "size": count},
+    )
+    return data or []
+
+
+def find_mmr_history(puuid: str, region: str, api_key: str) -> list[dict]:
+    """直近の RR 変動履歴を PUUID で引く (v2)。試合ごとの tier/RR 増減を持つ。"""
+    data = _get_raw(f"/v2/by-puuid/mmr-history/{region or 'ap'}/pc/{puuid}", api_key)
+    if not data:
+        return []
+    return data.get("history") or []

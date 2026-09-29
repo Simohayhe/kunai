@@ -456,6 +456,8 @@ class MainWindow(QMainWindow):
             self.current_id = new_id
             for cid, card in self.cards.items():
                 card.set_current(cid == new_id)
+            if new_id:
+                self._fetch_inventory_on_signin(new_id)
 
         bits = [env.describe()]
         if current:
@@ -957,6 +959,29 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_failed(self, message: str) -> None:
         self._auto_refreshing = False
         diagnostics.log(f"自動更新に失敗: {message}")
+
+    def _fetch_inventory_on_signin(self, account_id: str) -> None:
+        """アカウントが「使用中」になった瞬間に、所持品を一度だけ取りに行く。
+
+        これまでは「更新」を手動で押さない限り所持品が取れなかった。
+        毎回の定期追従 (auto_refresh_current_account) は所持品を含めない
+        軽い処理だが、こちらは使用中になった一回きりのイベントなので
+        所持品も含めて取得する。
+        """
+        account = self.vault.get(account_id)
+        if not account:
+            return
+        workers.run(
+            self.service.refresh, account, fetch_inventory=True,
+            on_done=self._on_signin_refreshed,
+            on_error=lambda m: diagnostics.log(f"サインイン時の所持品取得に失敗: {m}"),
+        )
+
+    def _on_signin_refreshed(self, account: Account) -> None:
+        self._inventory_cache.pop(account.id, None)
+        self.reload_accounts()
+        if self.selected_id == account.id:
+            self.select_account(account.id, force_reload=True)
 
     def refresh_all(self) -> None:
         accounts = [a for a in self.vault.accounts() if a.session_saved]

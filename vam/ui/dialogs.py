@@ -391,13 +391,16 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.stay_signed_in)
 
         # -- プレイヤー検索 ---------------------------------------------
-        search_title = QLabel("プレイヤー検索")
+        search_title = QLabel("プレイヤー検索 / 戦績のAPIモード")
         search_title.setObjectName("SectionTitle")
         layout.addWidget(search_title)
 
         search_desc = QLabel(
             "他プレイヤーを Riot ID で検索するには、外部の HenrikDev API の"
-            "キーが要ります。"
+            "キーが要ります。設定すると、戦績タブもサインイン不要の"
+            "APIモードになり、今ログインしていないアカウントの戦績も"
+            "見られるようになります。未設定ならこれまで通りサインイン"
+            "モード (ログイン中のアカウントのみ) で動きます。"
             "https://api.henrikdev.xyz/dashboard/ で無料で発行できます。"
         )
         search_desc.setObjectName("SubTitle")

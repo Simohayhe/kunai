@@ -22,6 +22,17 @@ def _noop(_: str) -> None:
     pass
 
 
+def _parse_iso_to_ms(value: str | None) -> int:
+    """HenrikDev の ISO8601 文字列 ('...Z' 含む) をエポック ms にする。"""
+    if not value:
+        return 0
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+    except (ValueError, TypeError):
+        return 0
+
+
 class ServiceError(Exception):
     pass
 
@@ -69,6 +80,8 @@ class MatchStats:
     headshot_pct: float = 0.0
     by_agent: list[AgentStat] = field(default_factory=list)
     by_map: list[MapStat] = field(default_factory=list)
+    # "api" (HenrikDev、サインイン不要) / "local" (ローカル API、要サインイン)
+    source: str = "local"
 
     @property
     def win_rate(self) -> float:
@@ -855,7 +868,114 @@ class AccountService:
                     progress: Progress = _noop) -> MatchStats:
         """HS 率・エージェント別/マップ別勝率を、直近の試合から集計する。
 
-        競技試合一覧は毎回取り直す (安い、1 回の通信)。試合ごとの詳細は
+        HenrikDev API キーが設定されていれば、そちら (API モード) を使う。
+        自分のセッションと違い、サインインしていないアカウントでも puuid
+        さえ分かれば取得できる。キーが無ければ、これまで通りローカル API
+        (サインインモード。今ログインしているアカウントでしか使えない)
+        にフォールバックする。
+        """
+        if self.henrik_api_key:
+            return self._match_stats_via_henrik(account, count, progress)
+        return self._match_stats_via_local_api(account, count, progress)
+
+    def _match_stats_via_henrik(self, account: Account, count: int,
+                                progress: Progress) -> MatchStats:
+        api_key = self.henrik_api_key
+        puuid = account.puuid
+        region = account.region or "ap"
+        if not puuid:
+            if not account.riot_id:
+                raise ServiceError(
+                    "Riot ID が未登録のため、API モードでは戦績を取得できません。"
+                )
+            name, _, tag = account.riot_id.partition("#")
+            try:
+                found = henrik.find_account(name.strip(), tag.strip(), api_key)
+            except henrik.HenrikError as exc:
+                raise ServiceError(str(exc)) from exc
+            puuid = found.puuid
+            region = found.region or region
+
+        progress(f"{account.display_name}: 試合一覧を取得中… (API)")
+        try:
+            matches_raw = henrik.find_matches(puuid, region, api_key, count=count)
+            history_raw = henrik.find_mmr_history(puuid, region, api_key)
+        except henrik.HenrikError as exc:
+            raise ServiceError(str(exc)) from exc
+        rr_by_match = {h.get("match_id"): h for h in history_raw}
+
+        try:
+            agents = self.content.agents()
+        except content.ContentError:
+            agents = {}
+        try:
+            maps = self.content.maps()
+        except content.ContentError:
+            maps = {}
+
+        competitive_updates: list[api.CompetitiveUpdate] = []
+        stats = MatchStats(matches=[], source="api")
+        agent_buckets: dict[str, AgentStat] = {}
+        map_buckets: dict[str, MapStat] = {}
+        headshots = bodyshots = legshots = 0
+
+        for m in matches_raw:
+            meta = m.get("metadata") or {}
+            match_id = meta.get("match_id", "")
+            map_info = meta.get("map") or {}
+            player = next(
+                (p for p in m.get("players") or [] if p.get("puuid") == puuid), None
+            )
+            if not player:
+                continue
+            team_id = player.get("team_id")
+            team = next(
+                (t for t in m.get("teams") or [] if t.get("team_id") == team_id), None
+            )
+            won = bool(team and team.get("won"))
+            pstats = player.get("stats") or {}
+            agent_info = player.get("agent") or {}
+
+            rr_info = rr_by_match.get(match_id) or {}
+            tier_info = rr_info.get("tier") or {}
+            competitive_updates.append(api.CompetitiveUpdate(
+                match_id=match_id, map_id=map_info.get("id", ""),
+                started_at=_parse_iso_to_ms(meta.get("started_at")),
+                tier_after=tier_info.get("id", 0),
+                rr_after=rr_info.get("rr", 0),
+                rr_earned=rr_info.get("last_change", 0),
+            ))
+
+            stats.games += 1
+            stats.wins += int(won)
+            headshots += pstats.get("headshots", 0)
+            bodyshots += pstats.get("bodyshots", 0)
+            legshots += pstats.get("legshots", 0)
+
+            agent_name = (agent_info.get("name")
+                         or agents.get(agent_info.get("id", ""), {}).get("name")
+                         or "不明なエージェント")
+            agent = agent_buckets.setdefault(agent_name, AgentStat(name=agent_name))
+            agent.games += 1
+            agent.wins += int(won)
+
+            map_name = (map_info.get("name")
+                       or maps.get(map_info.get("id", ""), {}).get("name")
+                       or "不明なマップ")
+            map_stat = map_buckets.setdefault(map_name, MapStat(name=map_name))
+            map_stat.games += 1
+            map_stat.wins += int(won)
+
+        stats.matches = competitive_updates
+        total_shots = headshots + bodyshots + legshots
+        stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
+        stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
+        stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
+        return stats
+
+    def _match_stats_via_local_api(self, account: Account, count: int,
+                                   progress: Progress) -> MatchStats:
+        """競技試合一覧は毎回取り直す (安い、1 回の通信)。試合ごとの詳細は
         終わった試合の内容が変わることは無いので、一度取れた分はディスクの
         キャッシュに残し、次回はまだ持っていない (＝新しく増えた) 試合の
         分だけ通信する。

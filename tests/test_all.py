@@ -758,6 +758,61 @@ def test_match_cache() -> None:
     check("別試合は別物", reloaded.get("puuid1", "match2") is None)
 
 
+def test_match_stats_api_mode() -> None:
+    section("戦績 (APIモード)")
+    from vam.models import Account
+    from vam.riot import henrik
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    svc.henrik_api_key = "dummy-key"
+
+    fake_matches = [{
+        "metadata": {"match_id": "m1", "map": {"id": "map1", "name": "アセント"},
+                     "started_at": "2026-01-01T00:00:00.000Z"},
+        "players": [{"puuid": "puuid1", "team_id": "Red",
+                     "agent": {"id": "a1", "name": "ジェット"},
+                     "stats": {"kills": 20, "deaths": 10, "assists": 2,
+                              "headshots": 8, "bodyshots": 10, "legshots": 2}}],
+        "teams": [{"team_id": "Red", "won": True}, {"team_id": "Blue", "won": False}],
+    }]
+    fake_history = [{"match_id": "m1", "tier": {"id": 21, "name": "アセンダント1"},
+                     "rr": 50, "last_change": 12, "date": "2026-01-01T00:00:00.000Z"}]
+
+    original_find_matches = henrik.find_matches
+    original_find_mmr_history = henrik.find_mmr_history
+    henrik.find_matches = lambda puuid, region, api_key, count=20: fake_matches
+    henrik.find_mmr_history = lambda puuid, region, api_key: fake_history
+    try:
+        account = Account(label="api-test", puuid="puuid1", region="ap")
+        stats = svc.match_stats(account, count=5)
+    finally:
+        henrik.find_matches = original_find_matches
+        henrik.find_mmr_history = original_find_mmr_history
+
+    check("APIキーがあれば使う", stats.source == "api")
+    check("試合数が正しい", stats.games == 1, str(stats.games))
+    check("勝敗が正しい", stats.wins == 1)
+    check("HS率が計算される", round(stats.headshot_pct) == 40, str(stats.headshot_pct))
+    check("試合詳細が入る", stats.matches[0].match_id == "m1")
+    check("RR増減が入る", stats.matches[0].rr_earned == 12, str(stats.matches[0].rr_earned))
+    check("エージェント別に出る", stats.by_agent and stats.by_agent[0].name == "ジェット")
+
+    # キー未設定ならローカル API 経路に落ちる (セッション未保存で弾かれる)
+    vault2 = Vault(Path(tempfile.mkdtemp()))
+    vault2.initialize()
+    svc2 = AccountService(vault2)
+    from vam.service import ServiceError
+    try:
+        svc2.match_stats(Account(label="no-key-test"))
+        check("キー未設定ならローカルAPI経路", False, "例外が出なかった")
+    except ServiceError:
+        check("キー未設定ならローカルAPI経路", True)
+
+
 def test_ui() -> None:
     section("UI の構築")
     from PySide6.QtWidgets import QApplication, QDialog
@@ -875,7 +930,8 @@ def main() -> int:
                test_service, test_real_file_format, test_process_isolation,
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
-               test_content, test_inventory_summary, test_match_cache, test_ui):
+               test_content, test_inventory_summary, test_match_cache,
+               test_match_stats_api_mode, test_ui):
         try:
             fn()
         except Exception as exc:
