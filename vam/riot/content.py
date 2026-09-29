@@ -111,11 +111,17 @@ class ContentCache:
         }
 
     def maps(self) -> dict[str, dict]:
+        """mapUrl (Riot ローカル API が返す形式) と uuid (HenrikDev API が
+        返す形式) の両方をキーにして引けるようにしておく。"""
         data = self.fetch("maps", "/maps") or []
-        return {
-            m["mapUrl"]: {"name": m.get("displayName", ""), "icon": m.get("splash")}
-            for m in data
-        }
+        out: dict[str, dict] = {}
+        for m in data:
+            info = {"name": m.get("displayName", ""), "icon": m.get("splash")}
+            if m.get("mapUrl"):
+                out[m["mapUrl"]] = info
+            if m.get("uuid"):
+                out[m["uuid"]] = info
+        return out
 
     def competitive_tiers(self) -> dict[int, dict]:
         """tier 番号 -> {name, icon, color}。最新のティア表のみ使う。"""
