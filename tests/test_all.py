@@ -822,6 +822,22 @@ def test_match_stats_api_mode() -> None:
           f"{detail.my_team_score}-{detail.enemy_team_score}")
     check("勝敗が入る", detail.won is True)
 
+    # account.region がローカル API 由来の不正な値 (例: "jp1") でも、
+    # puuid があれば Riot ID から HenrikDev 自身の region に引き直す。
+    original_find_account = henrik.find_account
+    henrik.find_account = lambda name, tag, api_key: henrik.PlayerAccount(
+        puuid="puuid1", name=name, tag=tag, region="ap",
+    )
+    try:
+        bad_region_account = Account(label="bad-region", puuid="puuid1",
+                                     region="jp1", riot_id="Self#1234")
+        resolved_puuid, resolved_region = svc._resolve_henrik_identity(bad_region_account)
+    finally:
+        henrik.find_account = original_find_account
+    check("不正なregionはHenrikDev自身の値に引き直す", resolved_region == "ap",
+          resolved_region)
+    check("puuidは維持される", resolved_puuid == "puuid1")
+
     # キー未設定ならローカル API 経路に落ちる (セッション未保存で弾かれる)
     vault2 = Vault(Path(tempfile.mkdtemp()))
     vault2.initialize()

@@ -973,23 +973,39 @@ class AccountService:
             return self._match_stats_via_henrik(account, count, progress)
         return self._match_stats_via_local_api(account, count, progress)
 
-    def _match_stats_via_henrik(self, account: Account, count: int,
-                                progress: Progress) -> MatchStats:
+    def _resolve_henrik_identity(self, account: Account) -> tuple[str, str]:
+        """HenrikDev 向けの (puuid, region) を用意する。
+
+        account.region はローカル API (Riot Client の chat/presence) 由来の
+        値で、"jp1" のような HenrikDev が受け付けない形式のことがある
+        (実機で確認済み: HenrikDev はリクエストを 400 で弾く)。
+        api.REGIONS ("ap"/"na"/"eu"/"kr"/"latam"/"br") に無ければ、
+        puuid が既に分かっていても Riot ID から HenrikDev 自身の account
+        検索に投げ直して、HenrikDev が認識する正しい region を取り直す。
+        """
         api_key = self.henrik_api_key
         puuid = account.puuid
         region = account.region or "ap"
-        if not puuid:
+        if not puuid or region not in api.REGIONS:
             if not account.riot_id:
+                if puuid and region:
+                    return puuid, region  # Riot ID が無ければ手も足も出ないのでそのまま試す
                 raise ServiceError(
-                    "Riot ID が未登録のため、API モードでは戦績を取得できません。"
+                    "Riot ID が未登録のため、API モードでは取得できません。"
                 )
             name, _, tag = account.riot_id.partition("#")
             try:
                 found = henrik.find_account(name.strip(), tag.strip(), api_key)
             except henrik.HenrikError as exc:
                 raise ServiceError(str(exc)) from exc
-            puuid = found.puuid
+            puuid = found.puuid or puuid
             region = found.region or region
+        return puuid, region
+
+    def _match_stats_via_henrik(self, account: Account, count: int,
+                                progress: Progress) -> MatchStats:
+        api_key = self.henrik_api_key
+        puuid, region = self._resolve_henrik_identity(account)
 
         progress(f"{account.display_name}: 試合一覧を取得中… (API)")
         try:
@@ -1177,20 +1193,7 @@ class AccountService:
 
     def _match_detail_via_henrik(self, account: Account, match_id: str) -> MatchDetail:
         api_key = self.henrik_api_key
-        puuid = account.puuid
-        region = account.region or "ap"
-        if not puuid:
-            if not account.riot_id:
-                raise ServiceError(
-                    "Riot ID が未登録のため、API モードでは取得できません。"
-                )
-            name, _, tag = account.riot_id.partition("#")
-            try:
-                found = henrik.find_account(name.strip(), tag.strip(), api_key)
-            except henrik.HenrikError as exc:
-                raise ServiceError(str(exc)) from exc
-            puuid = found.puuid
-            region = found.region or region
+        puuid, region = self._resolve_henrik_identity(account)
 
         m = self._henrik_raw_matches.get(match_id)
         if m is None:
