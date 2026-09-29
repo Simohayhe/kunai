@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 from .. import diagnostics, updater
@@ -57,12 +57,17 @@ class MainWindow(QMainWindow):
         # None なら自動判定、True/False ならユーザーが手動で固定している。
         self._standby = False
         self._standby_override: bool | None = None
+        # ウィンドウを閉じても VALORANT の障害監視だけはトレイに常駐して
+        # 続ける。「終了」を選んだときだけ本当に終了する。
+        self._really_quit = False
+        self._tray_hint_shown = False
 
         self.setWindowTitle("Kunai")
         self.resize(1080, 700)
         self.setStyleSheet(theme.STYLESHEET)
 
         self._build()
+        self._build_tray()
         self._load_rank_icons()
         self.reload_accounts()
         self.refresh_environment()
@@ -1113,13 +1118,65 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(text)
         self.status.showMessage(message, 4000)
 
+    # ==================================================================
+    # タスクトレイ常駐 (閉じても VALORANT の障害監視は続ける)
+    # ==================================================================
+    def _build_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon = None
+            return
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.setToolTip("Kunai")
+
+        menu = QMenu()
+        menu.setStyleSheet(theme.STYLESHEET)
+        menu.addAction("開く", self._restore_from_tray)
+        menu.addSeparator()
+        menu.addAction("終了", self.quit_app)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                     QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self) -> None:
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_app(self) -> None:
+        self._really_quit = True
+        self.close()
+
     def closeEvent(self, event):
+        if not self._really_quit and self.tray_icon and self.tray_icon.isVisible():
+            # 「×」はトレイに隠すだけ。監視の定期通信はそのまま生きている。
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray_icon.showMessage(
+                    "Kunai はバックグラウンドで実行中です",
+                    "VALORANT のメンテナンス・障害監視は閉じても続きます。"
+                    "完全に終了するには、タスクトレイのアイコンから「終了」を選んでください。",
+                    QSystemTrayIcon.MessageIcon.Information, 4000,
+                )
+            return
+
         # 走行中のバックグラウンド処理が終わってから閉じる
         self._env_timer.stop()
         self._status_timer.stop()
         self._account_refresh_timer.stop()
         workers.wait_for_all(3000)
+        if self.tray_icon:
+            self.tray_icon.hide()
         super().closeEvent(event)
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().quit()
 
     # ==================================================================
     # ランクアイコン

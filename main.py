@@ -57,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     app = QApplication(sys.argv)
     app.setApplicationName("Kunai")
+    # ウィンドウを閉じてもトレイに隠れるだけで、アプリ自体は終わらせない
+    # (VALORANT の障害監視をバックグラウンドで続けるため)。
+    app.setQuitOnLastWindowClosed(False)
     icon_path = Path(__file__).parent / "assets" / "icon.ico"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
