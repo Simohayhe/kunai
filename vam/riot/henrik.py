@@ -141,3 +141,12 @@ def find_mmr_history(puuid: str, region: str, api_key: str) -> list[dict]:
     if not data:
         return []
     return data.get("history") or []
+
+
+def find_match(match_id: str, region: str, api_key: str) -> dict | None:
+    """1 試合分の全プレイヤー詳細を試合 ID で引く (v4)。
+
+    find_matches() の一覧に無い (もっと古い) 試合をスコアボードで開いた
+    ときのフォールバック用。返す形は find_matches() の要素 1 件分と同じ。
+    """
+    return _get_raw(f"/v4/match/{region or 'ap'}/{match_id}", api_key)

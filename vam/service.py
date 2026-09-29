@@ -22,6 +22,15 @@ def _noop(_: str) -> None:
     pass
 
 
+def _shots_to_pct(stats: dict) -> float:
+    """HenrikDev の stats {headshots, bodyshots, legshots} から HS% を出す。"""
+    hs = stats.get("headshots", 0)
+    bs = stats.get("bodyshots", 0)
+    ls = stats.get("legshots", 0)
+    total = hs + bs + ls
+    return (hs / total * 100) if total else 0.0
+
+
 def _parse_iso_to_ms(value: str | None) -> int:
     """HenrikDev の ISO8601 文字列 ('...Z' 含む) をエポック ms にする。"""
     if not value:
@@ -72,9 +81,92 @@ class MapStat:
 
 
 @dataclass
+class MatchListRow:
+    """戦績一覧の1行分。RR 変動と、自分のその試合の成績をまとめて持つ。"""
+    match_id: str = ""
+    map_id: str = ""
+    started_at: int = 0
+    tier_after: int = 0
+    rr_after: int = 0
+    rr_earned: int = 0
+    won: bool = False
+    kills: int = 0
+    deaths: int = 0
+    assists: int = 0
+    score: int = 0
+    team_score: int = 0
+    enemy_score: int = 0
+    placement: int = 0
+    headshot_pct: float = 0.0
+    damage_delta: int = 0
+
+    @property
+    def tier_after_name(self) -> str:
+        return api.tier_name(self.tier_after)
+
+    @property
+    def kd(self) -> float:
+        return self.kills / self.deaths if self.deaths else float(self.kills)
+
+
+@dataclass
+class MatchPlayerStat:
+    """スコアボード1行分 (自分・味方・敵、全員共通の形)。"""
+    puuid: str = ""
+    name: str = ""
+    tag: str = ""
+    party_id: str = ""
+    agent_id: str = ""
+    agent_name: str = ""
+    agent_icon: str = ""
+    tier_name: str = ""
+    tier_icon: str = ""
+    score: int = 0
+    kills: int = 0
+    deaths: int = 0
+    assists: int = 0
+    headshots: int = 0
+    bodyshots: int = 0
+    legshots: int = 0
+    damage_dealt: int = 0
+    damage_received: int = 0
+    is_self: bool = False
+
+    @property
+    def riot_id(self) -> str:
+        return f"{self.name}#{self.tag}" if self.tag else self.name
+
+    @property
+    def kd(self) -> float:
+        return self.kills / self.deaths if self.deaths else float(self.kills)
+
+    @property
+    def headshot_pct(self) -> float:
+        total = self.headshots + self.bodyshots + self.legshots
+        return (self.headshots / total * 100) if total else 0.0
+
+    @property
+    def damage_delta(self) -> int:
+        return self.damage_dealt - self.damage_received
+
+
+@dataclass
+class MatchDetail:
+    """1 試合のスコアボード。味方/敵チームに分けて、スコア順で持つ。"""
+    match_id: str = ""
+    map_name: str = ""
+    started_at: int = 0
+    won: bool = False
+    my_team_score: int = 0
+    enemy_team_score: int = 0
+    my_team: list[MatchPlayerStat] = field(default_factory=list)
+    enemy_team: list[MatchPlayerStat] = field(default_factory=list)
+
+
+@dataclass
 class MatchStats:
     """直近の試合から集計した HS 率・エージェント別/マップ別勝率。"""
-    matches: list[api.CompetitiveUpdate] = field(default_factory=list)
+    matches: list[MatchListRow] = field(default_factory=list)
     games: int = 0
     wins: int = 0
     headshot_pct: float = 0.0
@@ -125,6 +217,9 @@ class AccountService:
         self.vault = vault
         self.content = content.ContentCache(vault.app_dir / "cache")
         self.match_cache = MatchCache(vault.app_dir / "cache")
+        # HenrikDev モードで戦績一覧を取ったときの生データ。スコアボードを
+        # 開くときに (アプリを再起動していなければ) 取り直さずに使う。
+        self._henrik_raw_matches: dict[str, dict] = {}
 
     @property
     def stay_signed_in(self) -> bool:
@@ -913,7 +1008,7 @@ class AccountService:
         except content.ContentError:
             maps = {}
 
-        competitive_updates: list[api.CompetitiveUpdate] = []
+        rows: list[MatchListRow] = []
         stats = MatchStats(matches=[], source="api")
         agent_buckets: dict[str, AgentStat] = {}
         map_buckets: dict[str, MapStat] = {}
@@ -923,27 +1018,47 @@ class AccountService:
             meta = m.get("metadata") or {}
             match_id = meta.get("match_id", "")
             map_info = meta.get("map") or {}
-            player = next(
-                (p for p in m.get("players") or [] if p.get("puuid") == puuid), None
-            )
+            all_players = m.get("players") or []
+            player = next((p for p in all_players if p.get("puuid") == puuid), None)
             if not player:
                 continue
+            # 詳細スコアボード (クリックしたときに使う) を、取り直さずに
+            # 使えるようセッション中だけ覚えておく。
+            self._henrik_raw_matches[match_id] = m
+
             team_id = player.get("team_id")
-            team = next(
-                (t for t in m.get("teams") or [] if t.get("team_id") == team_id), None
-            )
+            teams = m.get("teams") or []
+            team = next((t for t in teams if t.get("team_id") == team_id), None)
+            enemy_team = next((t for t in teams if t.get("team_id") != team_id), None)
             won = bool(team and team.get("won"))
             pstats = player.get("stats") or {}
             agent_info = player.get("agent") or {}
+            damage = pstats.get("damage") or {}
+
+            ranked = sorted(
+                all_players, key=lambda p: (p.get("stats") or {}).get("score", 0),
+                reverse=True,
+            )
+            placement = next(
+                (i + 1 for i, p in enumerate(ranked) if p.get("puuid") == puuid), 0
+            )
 
             rr_info = rr_by_match.get(match_id) or {}
             tier_info = rr_info.get("tier") or {}
-            competitive_updates.append(api.CompetitiveUpdate(
+            rows.append(MatchListRow(
                 match_id=match_id, map_id=map_info.get("id", ""),
                 started_at=_parse_iso_to_ms(meta.get("started_at")),
                 tier_after=tier_info.get("id", 0),
                 rr_after=rr_info.get("rr", 0),
                 rr_earned=rr_info.get("last_change", 0),
+                won=won,
+                kills=pstats.get("kills", 0), deaths=pstats.get("deaths", 0),
+                assists=pstats.get("assists", 0), score=pstats.get("score", 0),
+                team_score=(team or {}).get("rounds", {}).get("won", 0),
+                enemy_score=(enemy_team or {}).get("rounds", {}).get("won", 0),
+                placement=placement,
+                headshot_pct=_shots_to_pct(pstats),
+                damage_delta=damage.get("dealt", 0) - damage.get("received", 0),
             ))
 
             stats.games += 1
@@ -966,7 +1081,7 @@ class AccountService:
             map_stat.games += 1
             map_stat.wins += int(won)
 
-        stats.matches = competitive_updates
+        stats.matches = rows
         total_shots = headshots + bodyshots + legshots
         stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
         stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
@@ -998,7 +1113,8 @@ class AccountService:
         except content.ContentError:
             maps = {}
 
-        stats = MatchStats(matches=matches)
+        stats = MatchStats(matches=[])
+        rows: list[MatchListRow] = []
         agent_buckets: dict[str, AgentStat] = {}
         map_buckets: dict[str, MapStat] = {}
         headshots = bodyshots = legshots = 0
@@ -1016,6 +1132,16 @@ class AccountService:
             if not summary:
                 continue
 
+            rows.append(MatchListRow(
+                match_id=m.match_id, map_id=summary.map_id, started_at=m.started_at,
+                tier_after=m.tier_after, rr_after=m.rr_after, rr_earned=m.rr_earned,
+                won=summary.won, kills=summary.kills, deaths=summary.deaths,
+                assists=summary.assists, score=summary.score,
+                team_score=summary.team_score, enemy_score=summary.enemy_score,
+                placement=summary.placement, headshot_pct=summary.headshot_pct,
+                damage_delta=summary.damage_delta,
+            ))
+
             stats.games += 1
             stats.wins += int(summary.won)
             headshots += summary.headshots
@@ -1032,12 +1158,197 @@ class AccountService:
             map_stat.games += 1
             map_stat.wins += int(summary.won)
 
+        stats.matches = rows
         total_shots = headshots + bodyshots + legshots
         stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
         stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
         stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
         self.match_cache.save()
         return stats
+
+    # -- 試合詳細 (スコアボード) ---------------------------------------------
+    def match_detail(self, account: Account, match_id: str) -> MatchDetail:
+        """1 試合分の全員のスコアボードを組み立てる。モードの選び方は
+        match_stats() と同じ (API キーがあれば API モード)。
+        """
+        if self.henrik_api_key:
+            return self._match_detail_via_henrik(account, match_id)
+        return self._match_detail_via_local_api(account, match_id)
+
+    def _match_detail_via_henrik(self, account: Account, match_id: str) -> MatchDetail:
+        api_key = self.henrik_api_key
+        puuid = account.puuid
+        region = account.region or "ap"
+        if not puuid:
+            if not account.riot_id:
+                raise ServiceError(
+                    "Riot ID が未登録のため、API モードでは取得できません。"
+                )
+            name, _, tag = account.riot_id.partition("#")
+            try:
+                found = henrik.find_account(name.strip(), tag.strip(), api_key)
+            except henrik.HenrikError as exc:
+                raise ServiceError(str(exc)) from exc
+            puuid = found.puuid
+            region = found.region or region
+
+        m = self._henrik_raw_matches.get(match_id)
+        if m is None:
+            try:
+                m = henrik.find_match(match_id, region, api_key)
+            except henrik.HenrikError as exc:
+                raise ServiceError(str(exc)) from exc
+        if not m:
+            raise ServiceError("試合データが見つかりませんでした。")
+
+        try:
+            agents = self.content.agents()
+        except content.ContentError:
+            agents = {}
+        try:
+            tiers = self.content.competitive_tiers()
+        except content.ContentError:
+            tiers = {}
+
+        meta = m.get("metadata") or {}
+        map_info = meta.get("map") or {}
+        all_players = m.get("players") or []
+        me = next((p for p in all_players if p.get("puuid") == puuid), None)
+        my_team_id = me.get("team_id") if me else None
+        teams = m.get("teams") or []
+        my_team_info = next((t for t in teams if t.get("team_id") == my_team_id), None)
+        enemy_team_info = next((t for t in teams if t.get("team_id") != my_team_id), None)
+
+        def build(p: dict) -> MatchPlayerStat:
+            pstats = p.get("stats") or {}
+            damage = pstats.get("damage") or {}
+            agent_info = p.get("agent") or {}
+            tier_info = p.get("tier") or {}
+            tier_id = tier_info.get("id", 0)
+            tier_meta = tiers.get(tier_id, {})
+            return MatchPlayerStat(
+                puuid=p.get("puuid", ""), name=p.get("name", ""), tag=p.get("tag", ""),
+                party_id=p.get("party_id", ""),
+                agent_id=agent_info.get("id", ""),
+                agent_name=(agent_info.get("name")
+                           or agents.get(agent_info.get("id", ""), {}).get("name", "")),
+                agent_icon=agents.get(agent_info.get("id", ""), {}).get("icon", ""),
+                tier_name=tier_info.get("name") or tier_meta.get("name", ""),
+                tier_icon=tier_meta.get("icon", ""),
+                score=pstats.get("score", 0), kills=pstats.get("kills", 0),
+                deaths=pstats.get("deaths", 0), assists=pstats.get("assists", 0),
+                headshots=pstats.get("headshots", 0), bodyshots=pstats.get("bodyshots", 0),
+                legshots=pstats.get("legshots", 0),
+                damage_dealt=damage.get("dealt", 0), damage_received=damage.get("received", 0),
+                is_self=p.get("puuid") == puuid,
+            )
+
+        my_team = sorted(
+            (build(p) for p in all_players if p.get("team_id") == my_team_id),
+            key=lambda ps: -ps.score,
+        )
+        enemy_team = sorted(
+            (build(p) for p in all_players if p.get("team_id") != my_team_id),
+            key=lambda ps: -ps.score,
+        )
+        return MatchDetail(
+            match_id=meta.get("match_id", ""), map_name=map_info.get("name", ""),
+            started_at=_parse_iso_to_ms(meta.get("started_at")),
+            won=bool(my_team_info and my_team_info.get("won")),
+            my_team_score=(my_team_info or {}).get("rounds", {}).get("won", 0),
+            enemy_team_score=(enemy_team_info or {}).get("rounds", {}).get("won", 0),
+            my_team=my_team, enemy_team=enemy_team,
+        )
+
+    def _match_detail_via_local_api(self, account: Account, match_id: str) -> MatchDetail:
+        result = self.authenticate(account)
+        try:
+            version = self.content.client_version()
+        except content.ContentError:
+            version = ""
+        client = api.ValorantApi(result, region=result.region or account.region,
+                                 client_version=version)
+        data = client.match_details(match_id)
+        puuid = result.puuid
+
+        all_players = data.get("players") or []
+        me = next((p for p in all_players if p.get("subject") == puuid), None)
+        my_team_id = me.get("teamId") if me else None
+        teams = data.get("teams") or []
+        my_team_info = next((t for t in teams if t.get("teamId") == my_team_id), None)
+        enemy_team_info = next((t for t in teams if t.get("teamId") != my_team_id), None)
+
+        # ラウンドごとのダメージ内訳 (与/被とも) を全員分まとめて集計する。
+        damage_dealt: dict[str, int] = {}
+        damage_received: dict[str, int] = {}
+        hs: dict[str, int] = {}
+        bs: dict[str, int] = {}
+        ls: dict[str, int] = {}
+        for round_result in data.get("roundResults") or []:
+            for player_stats in round_result.get("playerStats") or []:
+                subject = player_stats.get("subject")
+                for dmg in player_stats.get("damage") or []:
+                    if subject:
+                        damage_dealt[subject] = damage_dealt.get(subject, 0) + dmg.get("damage", 0)
+                        hs[subject] = hs.get(subject, 0) + dmg.get("headshots", 0)
+                        bs[subject] = bs.get(subject, 0) + dmg.get("bodyshots", 0)
+                        ls[subject] = ls.get(subject, 0) + dmg.get("legshots", 0)
+                    receiver = dmg.get("receiver")
+                    if receiver:
+                        damage_received[receiver] = damage_received.get(receiver, 0) + dmg.get("damage", 0)
+
+        try:
+            agents = self.content.agents()
+        except content.ContentError:
+            agents = {}
+        try:
+            tiers = self.content.competitive_tiers()
+        except content.ContentError:
+            tiers = {}
+        try:
+            maps = self.content.maps()
+        except content.ContentError:
+            maps = {}
+
+        def build(p: dict) -> MatchPlayerStat:
+            subject = p.get("subject", "")
+            pstats = p.get("stats") or {}
+            agent_id = p.get("characterId", "")
+            agent_info = agents.get(agent_id, {})
+            tier_info = tiers.get(p.get("competitiveTier", 0), {})
+            return MatchPlayerStat(
+                puuid=subject, name=p.get("gameName", ""), tag=p.get("tagLine", ""),
+                party_id=p.get("partyId", ""),
+                agent_id=agent_id, agent_name=agent_info.get("name", ""),
+                agent_icon=agent_info.get("icon", ""),
+                tier_name=tier_info.get("name", ""), tier_icon=tier_info.get("icon", ""),
+                score=pstats.get("score", 0), kills=pstats.get("kills", 0),
+                deaths=pstats.get("deaths", 0), assists=pstats.get("assists", 0),
+                headshots=hs.get(subject, 0), bodyshots=bs.get(subject, 0),
+                legshots=ls.get(subject, 0),
+                damage_dealt=damage_dealt.get(subject, 0),
+                damage_received=damage_received.get(subject, 0),
+                is_self=subject == puuid,
+            )
+
+        my_team = sorted(
+            (build(p) for p in all_players if p.get("teamId") == my_team_id),
+            key=lambda ps: -ps.score,
+        )
+        enemy_team = sorted(
+            (build(p) for p in all_players if p.get("teamId") != my_team_id),
+            key=lambda ps: -ps.score,
+        )
+        match_info = data.get("matchInfo") or {}
+        return MatchDetail(
+            match_id=match_info.get("matchId", match_id),
+            map_name=maps.get(match_info.get("mapId", ""), {}).get("name", ""),
+            started_at=match_info.get("gameStartMillis", 0),
+            won=bool(my_team_info and my_team_info.get("won")),
+            my_team_score=(my_team_info or {}).get("numPoints", 0),
+            enemy_team_score=(enemy_team_info or {}).get("numPoints", 0),
+            my_team=my_team, enemy_team=enemy_team,
+        )
 
     # -- 所持品の集計 -------------------------------------------------------
     def weapon_inventory(self, account: Account) -> list[WeaponGroup]:

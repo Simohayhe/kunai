@@ -770,14 +770,24 @@ def test_match_stats_api_mode() -> None:
     svc = AccountService(vault)
     svc.henrik_api_key = "dummy-key"
 
+    def _p(puuid, team, name, tag, party, score, kills=0, deaths=0, assists=0):
+        return {"puuid": puuid, "team_id": team, "name": name, "tag": tag,
+               "party_id": party, "agent": {"id": "a1", "name": "ジェット"},
+               "stats": {"score": score, "kills": kills, "deaths": deaths,
+                        "assists": assists, "headshots": 8, "bodyshots": 10,
+                        "legshots": 2, "damage": {"dealt": 2000, "received": 1500}}}
+
     fake_matches = [{
         "metadata": {"match_id": "m1", "map": {"id": "map1", "name": "アセント"},
                      "started_at": "2026-01-01T00:00:00.000Z"},
-        "players": [{"puuid": "puuid1", "team_id": "Red",
-                     "agent": {"id": "a1", "name": "ジェット"},
-                     "stats": {"kills": 20, "deaths": 10, "assists": 2,
-                              "headshots": 8, "bodyshots": 10, "legshots": 2}}],
-        "teams": [{"team_id": "Red", "won": True}, {"team_id": "Blue", "won": False}],
+        "players": [
+            _p("puuid1", "Red", "Self", "1234", "party-a", 6000, 20, 10, 2),
+            _p("puuid2", "Red", "Duo", "5678", "party-a", 5000, 15, 12, 3),
+            _p("puuid3", "Blue", "Enemy1", "1111", "party-b", 5500, 18, 11, 1),
+            _p("puuid4", "Blue", "Enemy2", "2222", "party-b", 3000, 8, 15, 4),
+        ],
+        "teams": [{"team_id": "Red", "won": True, "rounds": {"won": 13, "lost": 8}},
+                 {"team_id": "Blue", "won": False, "rounds": {"won": 8, "lost": 13}}],
     }]
     fake_history = [{"match_id": "m1", "tier": {"id": 21, "name": "アセンダント1"},
                      "rr": 50, "last_change": 12, "date": "2026-01-01T00:00:00.000Z"}]
@@ -800,6 +810,17 @@ def test_match_stats_api_mode() -> None:
     check("試合詳細が入る", stats.matches[0].match_id == "m1")
     check("RR増減が入る", stats.matches[0].rr_earned == 12, str(stats.matches[0].rr_earned))
     check("エージェント別に出る", stats.by_agent and stats.by_agent[0].name == "ジェット")
+
+    # スコアボード (キャッシュ済みの生データを使うので通信は発生しない)
+    detail = svc.match_detail(account, "m1")
+    check("味方2人・敵2人", len(detail.my_team) == 2 and len(detail.enemy_team) == 2)
+    check("スコア降順", [p.score for p in detail.my_team] == [6000, 5000])
+    check("自分にis_selfが立つ", detail.my_team[0].is_self and not detail.my_team[1].is_self)
+    check("デュオのparty_idが一致", detail.my_team[0].party_id == detail.my_team[1].party_id)
+    check("味方と敵のparty_idは別", detail.my_team[0].party_id != detail.enemy_team[0].party_id)
+    check("チームスコアが入る", detail.my_team_score == 13 and detail.enemy_team_score == 8,
+          f"{detail.my_team_score}-{detail.enemy_team_score}")
+    check("勝敗が入る", detail.won is True)
 
     # キー未設定ならローカル API 経路に落ちる (セッション未保存で弾かれる)
     vault2 = Vault(Path(tempfile.mkdtemp()))

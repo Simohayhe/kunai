@@ -8,8 +8,8 @@ from __future__ import annotations
 import time
 
 from ..models import Account, InventoryInfo, RankInfo, WalletInfo
-from ..riot.api import CompetitiveUpdate
 from ..riot.content import ContentCache, ContentError
+from ..service import MatchListRow
 from ..storage import Vault
 from .fake_riot import session_yaml
 
@@ -101,13 +101,16 @@ SAMPLE_MATCHES = [
 ]
 
 
-def sample_matches() -> list[CompetitiveUpdate]:
+def sample_matches() -> list[MatchListRow]:
     now_ms = int(time.time() * 1000)
     return [
-        CompetitiveUpdate(
-            match_id=f"demo-{i}", map_id=map_id, season_id="demo",
+        MatchListRow(
+            match_id=f"demo-{i}", map_id=map_id,
             started_at=now_ms - days_ago * 86400_000,
             tier_after=tier, rr_after=rr, rr_earned=earned,
+            won=earned > 0, kills=18, deaths=14, assists=4, score=220,
+            team_score=13 if earned > 0 else 8, enemy_score=8 if earned > 0 else 13,
+            placement=3, headshot_pct=28.0, damage_delta=120 if earned > 0 else -80,
         )
         for i, (map_id, earned, tier, rr, days_ago) in enumerate(SAMPLE_MATCHES)
     ]

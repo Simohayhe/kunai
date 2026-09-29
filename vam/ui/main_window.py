@@ -22,7 +22,7 @@ from ..version import __version__
 from . import theme, workers
 from .account_card import AccountCard
 from .detail_panel import DetailPanel
-from .dialogs import AccountDialog, PlayerSearchDialog, SettingsDialog
+from .dialogs import AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog
 from .icons import IconLoader
 
 STATUS_CHECK_INTERVAL_MS = 120_000
@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
 
         self.detail = DetailPanel()
         self.detail.history.reload_requested.connect(self.load_history)
+        self.detail.history.match_clicked.connect(self.open_match_detail)
         self.detail.inventory.reload_requested.connect(self.load_inventory)
         layout.addWidget(self.detail, 1)
 
@@ -1041,6 +1042,21 @@ class MainWindow(QMainWindow):
         if self.selected_id != account_id:
             return
         self.detail.history.set_message(message)
+
+    def open_match_detail(self, match_id: str) -> None:
+        account = self.vault.get(self.selected_id) if self.selected_id else None
+        if not account:
+            return
+        self.status.showMessage("試合詳細を取得中…")
+        workers.run(
+            self.service.match_detail, account, match_id,
+            on_done=self._on_match_detail_loaded,
+            on_error=lambda m: self._error("試合詳細を取得できませんでした", m),
+        )
+
+    def _on_match_detail_loaded(self, detail) -> None:
+        self.status.showMessage("")
+        MatchDetailDialog(detail, parent=self).exec()
 
     def _show_inventory(self, account: Account) -> None:
         """キャッシュがあればそれを出し、無ければ集計する (ボタンを押させない)。"""

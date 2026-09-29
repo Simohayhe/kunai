@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import Account
-from ..riot.api import CompetitiveUpdate
 from . import theme
 from .account_card import RankBadge
 
@@ -196,8 +195,18 @@ class OverviewTab(QWidget):
             self.info.addWidget(v, r, 1)
 
 
+class _ClickableFrame(QFrame):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class HistoryTab(QWidget):
     reload_requested = Signal()
+    match_clicked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -303,7 +312,7 @@ class HistoryTab(QWidget):
         if item and item.widget():
             item.widget().setText(value)
 
-    def set_matches(self, matches: list[CompetitiveUpdate], map_names: dict,
+    def set_matches(self, matches: list, map_names: dict,
                     tier_names: dict | None = None) -> None:
         self.clear()
         if not matches:
@@ -313,41 +322,63 @@ class HistoryTab(QWidget):
             self.rows.insertWidget(self.rows.count() - 1,
                                    self._row(m, map_names, tier_names or {}))
 
-    def _row(self, m: CompetitiveUpdate, map_names: dict, tier_names: dict) -> QFrame:
-        row = QFrame()
+    def _row(self, m, map_names: dict, tier_names: dict) -> QFrame:
+        border_color = theme.OK if m.won else theme.ACCENT
+        row = _ClickableFrame()
+        row.setCursor(Qt.PointingHandCursor)
         row.setStyleSheet(
             f"QFrame {{ background:{theme.BG_CARD}; border:1px solid {theme.BORDER};"
-            f" border-radius:4px; }} QLabel {{ border:none; }}"
+            f" border-left:3px solid {border_color}; border-radius:4px; }}"
+            f" QLabel {{ border:none; }}"
         )
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(11, 8, 11, 8)
-        layout.setSpacing(11)
+        row.clicked.connect(lambda: self.match_clicked.emit(m.match_id))
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(11, 7, 11, 7)
+        outer.setSpacing(3)
 
+        top = QHBoxLayout()
+        top.setSpacing(11)
         rr = m.rr_earned
         color = theme.OK if rr > 0 else (theme.ACCENT if rr < 0 else theme.TEXT_DIM)
         delta = QLabel(f"{rr:+d}" if rr else "±0")
         delta.setStyleSheet(f"color:{color}; font-weight:700; font-size:14px;")
-        delta.setFixedWidth(46)
-        layout.addWidget(delta)
+        delta.setFixedWidth(40)
+        top.addWidget(delta)
 
-        info = QVBoxLayout()
-        info.setSpacing(1)
         map_name = map_names.get(m.map_id, {}).get("name") or "不明なマップ"
         name = QLabel(map_name)
-        name.setStyleSheet("font-size:12px;")
-        info.addWidget(name)
+        name.setStyleSheet("font-size:12px; font-weight:600;")
+        top.addWidget(name, 1)
+
+        label = tier_names.get(m.tier_after, m.tier_after_name)
+        tier = QLabel(f"{label}  {m.rr_after} RR")
+        tier.setStyleSheet(f"color:{theme.rank_color(m.tier_after)}; font-size:11px;")
+        top.addWidget(tier)
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(11)
         when = QLabel(
             time.strftime("%Y/%m/%d %H:%M", time.localtime(m.started_at / 1000))
             if m.started_at else ""
         )
         when.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:10px;")
-        info.addWidget(when)
-        layout.addLayout(info, 1)
+        bottom.addWidget(when)
+        bottom.addStretch(1)
 
-        label = tier_names.get(m.tier_after, m.tier_after_name)
-        tier = QLabel(f"{label}  {m.rr_after} RR")
-        tier.setStyleSheet(f"color:{theme.rank_color(m.tier_after)}; font-size:12px;")
-        layout.addWidget(tier)
+        stats_text = (
+            f"{m.kills}/{m.deaths}/{m.assists}  ·  K/D {m.kd:.2f}  ·  "
+            f"ACS {m.score}  ·  HS {m.headshot_pct:.0f}%  ·  "
+            f"DDΔ {m.damage_delta:+d}"
+        )
+        if m.placement:
+            stats_text += f"  ·  {m.placement}位/10"
+        if m.team_score or m.enemy_score:
+            stats_text += f"  ·  {m.team_score}-{m.enemy_score}"
+        stats = QLabel(stats_text)
+        stats.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:10px;")
+        bottom.addWidget(stats)
+        outer.addLayout(bottom)
         return row
 
 

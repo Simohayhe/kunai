@@ -1,12 +1,15 @@
 """各種ダイアログ。保管庫の開錠、アカウントの追加・編集。"""
 from __future__ import annotations
 
+import time
+from collections import Counter
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QTextEdit,
-    QVBoxLayout,
+    QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..crypto import VaultLocked
@@ -550,3 +553,164 @@ class PlayerSearchDialog(QDialog):
         self.search_button.setEnabled(True)
         self.search_button.setText("検索")
         self.result.setText(message)
+
+
+# デュオ/トリオ (同じパーティ) を色分けするときの配色。チーム内で使い切ったら
+# 循環する (10人中、同じ色が複数パーティに割り当たることは稀だが許容する)。
+PARTY_COLORS = ["#00d4ff", "#ffb020", "#ff5c8a", "#7c5cff", "#22c55e"]
+
+
+class MatchDetailDialog(QDialog):
+    """1 試合分のスコアボード。tracker.gg を参考に、味方/敵を分けて
+    スコア順に並べ、デュオ/トリオ (同じパーティ) を色分けする。"""
+
+    def __init__(self, detail, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("試合詳細")
+        self.setMinimumSize(640, 540)
+        self.setStyleSheet(theme.STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(13)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        header = QHBoxLayout()
+        title = QLabel(detail.map_name or "不明なマップ")
+        title.setObjectName("Title")
+        header.addWidget(title)
+        header.addStretch(1)
+        result = QLabel("勝利" if detail.won else "敗北")
+        result.setStyleSheet(
+            f"color:{theme.OK if detail.won else theme.ACCENT}; "
+            "font-weight:700; font-size:16px;"
+        )
+        header.addWidget(result)
+        score = QLabel(f"{detail.my_team_score} - {detail.enemy_team_score}")
+        score.setObjectName("SubTitle")
+        header.addWidget(score)
+        layout.addLayout(header)
+
+        when = QLabel(
+            time.strftime("%Y/%m/%d %H:%M", time.localtime(detail.started_at / 1000))
+            if detail.started_at else ""
+        )
+        when.setObjectName("SubTitle")
+        layout.addWidget(when)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        container = QWidget()
+        inner = QVBoxLayout(container)
+        inner.setSpacing(16)
+        inner.setContentsMargins(0, 0, 6, 0)
+
+        party_colors = self._assign_party_colors(detail.my_team + detail.enemy_team)
+        inner.addWidget(self._team_section("味方", detail.my_team, theme.OK, party_colors))
+        inner.addWidget(self._team_section("敵", detail.enemy_team, theme.ACCENT, party_colors))
+        inner.addStretch(1)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _assign_party_colors(players) -> dict[str, str]:
+        """2 人以上いる party_id にだけ色を割り当てる (ソロは無色)。"""
+        counts = Counter(p.party_id for p in players if p.party_id)
+        colors: dict[str, str] = {}
+        i = 0
+        for party_id, n in counts.items():
+            if n >= 2:
+                colors[party_id] = PARTY_COLORS[i % len(PARTY_COLORS)]
+                i += 1
+        return colors
+
+    def _team_section(self, title: str, players: list, accent: str,
+                      party_colors: dict[str, str]) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        head = QLabel(title)
+        head.setStyleSheet(f"color:{accent}; font-weight:700; font-size:13px;")
+        layout.addWidget(head)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(9)
+        header_row.addWidget(self._col_label("", 4))
+        header_row.addWidget(self._col_label("プレイヤー", 0), 1)
+        header_row.addWidget(self._col_label("K/D/A", 88))
+        header_row.addWidget(self._col_label("ACS", 55))
+        header_row.addWidget(self._col_label("HS%", 50))
+        header_row.addWidget(self._col_label("DDΔ", 65))
+        layout.addLayout(header_row)
+
+        for p in players:
+            layout.addWidget(self._player_row(p, party_colors.get(p.party_id, "")))
+        return box
+
+    @staticmethod
+    def _col_label(text: str, width: int) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:10px; border:none;")
+        if width:
+            lbl.setFixedWidth(width)
+        return lbl
+
+    def _player_row(self, p, party_color: str) -> QFrame:
+        row = QFrame()
+        bg = theme.BG_HOVER if p.is_self else theme.BG_CARD
+        row.setStyleSheet(
+            f"QFrame {{ background:{bg}; border:1px solid {theme.BORDER};"
+            f" border-radius:4px; }} QLabel {{ border:none; }}"
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(9, 6, 9, 6)
+        layout.setSpacing(9)
+
+        bar = QLabel()
+        bar.setFixedWidth(4)
+        bar.setStyleSheet(
+            f"background:{party_color or 'transparent'}; border-radius:2px;"
+        )
+        layout.addWidget(bar)
+
+        name_col = QVBoxLayout()
+        name_col.setSpacing(0)
+        name = QLabel(p.riot_id + ("  (自分)" if p.is_self else ""))
+        name.setStyleSheet(
+            f"font-size:12px; font-weight:{700 if p.is_self else 400};"
+        )
+        name_col.addWidget(name)
+        agent = QLabel(p.agent_name or "?")
+        agent.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:10px;")
+        name_col.addWidget(agent)
+        layout.addLayout(name_col, 1)
+
+        kda = QLabel(f"{p.kills}/{p.deaths}/{p.assists}")
+        kda.setStyleSheet("font-size:11px;")
+        kda.setFixedWidth(88)
+        layout.addWidget(kda)
+
+        acs = QLabel(str(p.score))
+        acs.setStyleSheet("font-size:11px;")
+        acs.setFixedWidth(55)
+        layout.addWidget(acs)
+
+        hs = QLabel(f"{p.headshot_pct:.0f}%")
+        hs.setStyleSheet("font-size:11px;")
+        hs.setFixedWidth(50)
+        layout.addWidget(hs)
+
+        dd = p.damage_delta
+        dd_color = theme.OK if dd > 0 else (theme.ACCENT if dd < 0 else theme.TEXT_DIM)
+        dd_label = QLabel(f"{dd:+d}")
+        dd_label.setStyleSheet(f"color:{dd_color}; font-size:11px;")
+        dd_label.setFixedWidth(65)
+        layout.addWidget(dd_label)
+
+        return row

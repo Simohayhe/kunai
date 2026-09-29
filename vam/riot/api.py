@@ -105,7 +105,8 @@ class CompetitiveUpdate:
 
 @dataclass
 class MatchSummary:
-    """1 試合分。HS 率・エージェント別/マップ別勝率の集計に使う。"""
+    """1 試合分。HS 率・エージェント別/マップ別勝率の集計や、戦績一覧の
+    行表示 (K/D・ACS・DDΔ・順位) に使う。"""
     match_id: str = ""
     map_id: str = ""
     character_id: str = ""
@@ -117,11 +118,25 @@ class MatchSummary:
     bodyshots: int = 0
     legshots: int = 0
     started_at: int = 0
+    score: int = 0
+    team_score: int = 0
+    enemy_score: int = 0
+    placement: int = 0  # 1 がその試合の全体トップ (score 降順)
+    damage_dealt: int = 0
+    damage_received: int = 0
 
     @property
     def headshot_pct(self) -> float:
         total = self.headshots + self.bodyshots + self.legshots
         return (self.headshots / total * 100) if total else 0.0
+
+    @property
+    def kd(self) -> float:
+        return self.kills / self.deaths if self.deaths else float(self.kills)
+
+    @property
+    def damage_delta(self) -> int:
+        return self.damage_dealt - self.damage_received
 
 
 @dataclass
@@ -250,29 +265,41 @@ class ValorantApi:
 
         HS 率などの内訳は player の stats には無く、roundResults[].playerStats[]
         の damage[] に相手ごとの内訳として入っている (実機で確認済み)。
-        全ラウンド分を合算する。
+        全ラウンド分を合算する。ダメージは damage[].receiver で「誰に与えたか」
+        が分かるので、自分が receiver 側に出てくる分を合算すれば被ダメージになる。
         """
         puuid = puuid or self.auth.puuid
         data = self.match_details(match_id)
-        me = next((p for p in data.get("players", []) if p.get("subject") == puuid), None)
+        players = data.get("players", [])
+        me = next((p for p in players if p.get("subject") == puuid), None)
         if not me:
             return None
 
-        team = next(
-            (t for t in data.get("teams", []) if t.get("teamId") == me.get("teamId")), None
-        )
+        teams = data.get("teams") or []
+        team = next((t for t in teams if t.get("teamId") == me.get("teamId")), None)
+        enemy_team = next((t for t in teams if t.get("teamId") != me.get("teamId")), None)
+
         headshots = bodyshots = legshots = 0
+        damage_dealt = damage_received = 0
         for round_result in data.get("roundResults") or []:
             for player_stats in round_result.get("playerStats") or []:
-                if player_stats.get("subject") != puuid:
-                    continue
+                subject = player_stats.get("subject")
                 for dmg in player_stats.get("damage") or []:
-                    headshots += dmg.get("headshots", 0)
-                    bodyshots += dmg.get("bodyshots", 0)
-                    legshots += dmg.get("legshots", 0)
+                    if subject == puuid:
+                        damage_dealt += dmg.get("damage", 0)
+                        headshots += dmg.get("headshots", 0)
+                        bodyshots += dmg.get("bodyshots", 0)
+                        legshots += dmg.get("legshots", 0)
+                    if dmg.get("receiver") == puuid:
+                        damage_received += dmg.get("damage", 0)
 
         stats = me.get("stats") or {}
         match_info = data.get("matchInfo") or {}
+        ranked = sorted(players, key=lambda p: (p.get("stats") or {}).get("score", 0),
+                        reverse=True)
+        placement = next(
+            (i + 1 for i, p in enumerate(ranked) if p.get("subject") == puuid), 0
+        )
         return MatchSummary(
             match_id=match_id,
             map_id=match_info.get("mapId", ""),
@@ -282,6 +309,11 @@ class ValorantApi:
             assists=stats.get("assists", 0),
             headshots=headshots, bodyshots=bodyshots, legshots=legshots,
             started_at=match_info.get("gameStartMillis", 0),
+            score=stats.get("score", 0),
+            team_score=(team or {}).get("numPoints", 0),
+            enemy_score=(enemy_team or {}).get("numPoints", 0),
+            placement=placement,
+            damage_dealt=damage_dealt, damage_received=damage_received,
         )
 
     # -- ウォレット / 所持品 -----------------------------------------------
