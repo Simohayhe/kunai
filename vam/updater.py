@@ -130,15 +130,27 @@ def download(release: Release, dest_dir: Path, timeout: float = 60.0) -> Path:
 # サイレントに失敗することを確認した (move はエラーでもバッチを止めない
 # ので、そのまま気づかず古い exe を起動し直してしまう)。掴みが外れるまで
 # 数回リトライし、それでも駄目なら新しいファイルの場所を開いて知らせる。
+#
+# 呼び出し元が (バグや強制終了などで) 自分では終了しないケースに備えて、
+# プロセス終了待ちにも上限を付けてある。上限を超えたら taskkill で
+# 強制終了してから進む。これが無いと、待ち続けたまま入れ替えが一生
+# 起きず、新旧2つの exe がタスクに残り続けることになる (実機で確認済み)。
 BAT_TEMPLATE = """@echo off
 chcp 65001 >nul
 rem Kunai の更新用。終わったら自分を消す。
+set waits=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
 if not errorlevel 1 (
+  set /a waits+=1
+  if %waits% geq 30 (
+    taskkill /F /PID {pid} >nul 2>&1
+    goto swap
+  )
   ping -n 2 127.0.0.1 >nul
   goto wait
 )
+:swap
 set tries=0
 :retry
 move /y "{new_file}" "{target}" >nul 2>&1

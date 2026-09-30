@@ -669,8 +669,11 @@ class MainWindow(QMainWindow):
 
     def _on_update_downloaded(self, _result) -> None:
         self.status.showMessage("入れ替えのため終了します…")
-        # 入れ替え役が動き出したので、掴んでいる exe を手放すために終了する
-        QTimer.singleShot(600, self.close)
+        # 入れ替え役が動き出したので、掴んでいる exe を手放すために終了する。
+        # self.close() だとトレイに隠れるだけで実際には終了せず、入れ替え役が
+        # プロセスの終了をいつまでも待ち続けて exe が2つ残ってしまう
+        # (実機で確認済み)。ここは確実に終了させる quit_app() を使う。
+        QTimer.singleShot(600, self.quit_app)
 
     def _on_update_failed(self, message: str) -> None:
         release = self._pending_release

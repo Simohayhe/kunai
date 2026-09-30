@@ -20,6 +20,7 @@ from vam import diagnostics
 from vam.storage import Vault
 from vam.ui.dialogs import SetupDialog, UnlockDialog
 from vam.ui.main_window import MainWindow
+from vam.ui.single_instance import SingleInstanceGuard
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -64,6 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    # トレイに常駐したままだと、気づかずもう1つ起動してしまうことがある。
+    # 既に1つ動いていれば、そちらを前面に出すよう頼んでここで終わる。
+    # --demo は検証用に複数同時起動したいので対象外にする。
+    guard = None
+    if not args.demo:
+        guard = SingleInstanceGuard()
+        if not guard.try_lock():
+            return 0
+
     # exe だと標準エラーがどこにも出ないので、落ちた理由をログに残して知らせる
     def on_crash(log_file, exc):
         from PySide6.QtWidgets import QMessageBox
@@ -99,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     window = MainWindow(vault)
     if demo_env:
         window.setWindowTitle(window.windowTitle() + "  —  デモモード（モック環境）")
+    if guard:
+        guard.show_requested.connect(window._restore_from_tray)
     window.show()
 
     try:
