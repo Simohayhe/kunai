@@ -315,7 +315,11 @@ class AccountService:
             for event in status.diff(previous, current):
                 if webhook:
                     try:
-                        status.notify_discord(webhook, event, mention=mention)
+                        # 重大 (critical) なときだけメンションを付ける。
+                        # info/warning やメンテナンス (severity 無し) は
+                        # 毎回メンションされるとうるさいので付けない。
+                        event_mention = mention if event.severity == "critical" else ""
+                        status.notify_discord(webhook, event, mention=event_mention)
                     except status.StatusError as exc:
                         progress(str(exc))
 

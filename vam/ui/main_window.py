@@ -57,6 +57,8 @@ class MainWindow(QMainWindow):
         # None なら自動判定、True/False ならユーザーが手動で固定している。
         self._standby = False
         self._standby_override: bool | None = None
+        # ステータス確認が重ねて走らないようにする (通知の重複防止)
+        self._status_checking = False
         # ウィンドウを閉じても VALORANT の障害監視だけはトレイに常駐して
         # 続ける。「終了」を選んだときだけ本当に終了する。
         self._really_quit = False
@@ -512,18 +514,28 @@ class MainWindow(QMainWindow):
     # VALORANT のステータス (メンテナンス・障害)
     # ==================================================================
     def check_status(self) -> None:
-        if self._standby:
+        # 前回の確認がまだ終わっていなければ重ねて走らせない。通信が
+        # 詰まったときに2分おきのタイマーで何本も重なると、前回の保存が
+        # 間に合わないうちに次が「新規発生」と判定し、同じ障害を2回
+        # Discord に通知してしまうことがあった (実機で確認済み)。
+        if self._standby or self._status_checking:
             return
+        self._status_checking = True
         workers.run(
             self.service.check_status,
             on_done=self._on_status_checked,
-            on_error=lambda m: diagnostics.log(f"ステータス確認に失敗: {m}"),
+            on_error=self._on_status_check_failed,
         )
 
     def _on_status_checked(self, result: tuple[bool, str]) -> None:
+        self._status_checking = False
         active, summary = result
         self.status_banner_label.setText(summary)
         self.status_banner.setVisible(active)
+
+    def _on_status_check_failed(self, message: str) -> None:
+        self._status_checking = False
+        diagnostics.log(f"ステータス確認に失敗: {message}")
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(

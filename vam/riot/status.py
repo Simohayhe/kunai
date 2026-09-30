@@ -135,6 +135,11 @@ def summarize(current: StatusSnapshot, locale: str = "ja_JP") -> str:
     return "　".join(parts)
 
 
+# incident_severity の正式な値は info/warning/critical の3種のみ
+# (Riot 公式 VAL-STATUS-V1 のスキーマに明記されている)。
+SEVERITY_LABELS = {"info": "軽微", "warning": "警告", "critical": "重大"}
+
+
 def notify_discord(webhook_url: str, event: StatusEvent, timeout: float = 10.0,
                     mention: str = "") -> None:
     label = "メンテナンス" if event.kind == "maintenance" else "障害"
@@ -145,7 +150,7 @@ def notify_discord(webhook_url: str, event: StatusEvent, timeout: float = 10.0,
     lines.append(f"**VALORANT {label}{action}**")
     lines.append(event.title)
     if event.severity:
-        lines.append(f"重大度: {event.severity}")
+        lines.append(f"重大度: {SEVERITY_LABELS.get(event.severity, event.severity)}")
     if event.detail and event.detail != event.title:
         lines.append(event.detail)
     try:

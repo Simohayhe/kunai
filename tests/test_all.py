@@ -850,6 +850,65 @@ def test_match_stats_api_mode() -> None:
         check("キー未設定ならローカルAPI経路", True)
 
 
+def test_status_notify() -> None:
+    section("障害通知")
+    from vam.models import Account
+    from vam.riot import status
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    # diff(): 新規発生・解消の判定
+    prev = status.StatusSnapshot(incidents={"1": {"id": 1, "incident_severity": "critical"}})
+    cur = status.StatusSnapshot(incidents={
+        "1": {"id": 1, "incident_severity": "critical"},
+        "2": {"id": 2, "incident_severity": "info"},
+    })
+    events = status.diff(prev, cur)
+    check("新規発生を検知", len(events) == 1 and events[0].id == "2" and events[0].action == "started")
+
+    prev2 = status.StatusSnapshot(incidents={"1": {"id": 1, "incident_severity": "critical"}})
+    cur2 = status.StatusSnapshot()
+    events2 = status.diff(prev2, cur2)
+    check("解消を検知", len(events2) == 1 and events2[0].action == "resolved")
+
+    # 同じ前回/今回なら何も検知しない (重複通知の防止の土台)
+    events3 = status.diff(prev, prev)
+    check("差分が無ければ何も検知しない", events3 == [])
+
+    # check_status(): critical だけメンション付きで通知する
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    svc.discord_webhook_url = "https://discord.example/webhook"
+    svc.discord_mention = "@everyone"
+
+    state_path = vault.app_dir / "status_state.json"
+    status.save_snapshot(state_path, status.StatusSnapshot())
+
+    calls = []
+    original_notify = status.notify_discord
+    original_fetch = status.fetch
+    status.notify_discord = lambda webhook_url, event, timeout=10.0, mention="": calls.append(
+        (event.severity, mention)
+    )
+    status.fetch = lambda region="ap", timeout=10.0: status.StatusSnapshot(incidents={
+        "10": {"id": 10, "incident_severity": "critical", "titles": []},
+        "11": {"id": 11, "incident_severity": "info", "titles": []},
+        "12": {"id": 12, "incident_severity": "warning", "titles": []},
+    })
+    try:
+        svc.check_status()
+    finally:
+        status.notify_discord = original_notify
+        status.fetch = original_fetch
+
+    by_severity = {sev: mention for sev, mention in calls}
+    check("3件とも通知される", len(calls) == 3, str(calls))
+    check("criticalはメンション付き", by_severity.get("critical") == "@everyone", str(by_severity))
+    check("infoはメンション無し", by_severity.get("info") == "")
+    check("warningもメンション無し", by_severity.get("warning") == "")
+
+
 def test_ui() -> None:
     section("UI の構築")
     from PySide6.QtWidgets import QApplication, QDialog
@@ -968,7 +1027,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_ui):
+               test_match_stats_api_mode, test_status_notify, test_ui):
         try:
             fn()
         except Exception as exc:
