@@ -321,8 +321,9 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                parent=None):
+                vault: Vault, parent=None):
         super().__init__(parent)
+        self.vault = vault
         self.setWindowTitle("設定")
         self.setMinimumWidth(460)
         self.setStyleSheet(theme.STYLESHEET)
@@ -418,6 +419,23 @@ class SettingsDialog(QDialog):
         search_form.addRow("APIキー", self.henrik_key)
         layout.addLayout(search_form)
 
+        # -- マスターパスワード -----------------------------------------
+        pw_title = QLabel("マスターパスワード")
+        pw_title.setObjectName("SectionTitle")
+        layout.addWidget(pw_title)
+
+        pw_row = QHBoxLayout()
+        pw_row.setSpacing(9)
+        self.password_state_label = QLabel(
+            "現在: パスワード設定済み" if vault.needs_password else "現在: パスワードなし"
+        )
+        self.password_state_label.setObjectName("SubTitle")
+        pw_row.addWidget(self.password_state_label, 1)
+        self.password_button = QPushButton("外す" if vault.needs_password else "設定する")
+        self.password_button.clicked.connect(self._open_change_password)
+        pw_row.addWidget(self.password_button)
+        layout.addLayout(pw_row)
+
         # -- 更新 ---------------------------------------------------
         update_title = QLabel("ソフトの更新")
         update_title.setObjectName("SectionTitle")
@@ -465,6 +483,33 @@ class SettingsDialog(QDialog):
     def stay_signed_in_enabled(self) -> bool:
         return self.stay_signed_in.isChecked()
 
+    # -- マスターパスワードの付け外し -----------------------------------------
+    def _open_change_password(self) -> None:
+        if self.vault.needs_password:
+            confirm = QMessageBox.question(
+                self, "パスワードを外しますか？",
+                "パスワードを外すと、この Windows アカウントでログインして"
+                "いれば誰でも保管庫を開けるようになります。\n続けますか？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            self.vault.change_password(None)
+            self._refresh_password_state()
+            return
+
+        dialog = SetPasswordDialog(parent=self)
+        if dialog.exec():
+            self.vault.change_password(dialog.new_password())
+            self._refresh_password_state()
+
+    def _refresh_password_state(self) -> None:
+        protected = self.vault.needs_password
+        self.password_state_label.setText(
+            "現在: パスワード設定済み" if protected else "現在: パスワードなし"
+        )
+        self.password_button.setText("外す" if protected else "設定する")
+
     # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
     def set_checking(self) -> None:
         self.check_button.setEnabled(False)
@@ -489,6 +534,67 @@ class SettingsDialog(QDialog):
         self.update_status.setText(f"{tag} が利用できます。")
         self.update_button.setText(f"{tag} に更新")
         self.update_button.setVisible(True)
+
+
+class SetPasswordDialog(QDialog):
+    """途中からマスターパスワードを新しく設定する。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("マスターパスワードを設定")
+        self.setMinimumWidth(360)
+        self.setStyleSheet(theme.STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(13)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        title = QLabel("マスターパスワードを設定")
+        title.setObjectName("Title")
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(9)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.confirm = QLineEdit()
+        self.confirm.setEchoMode(QLineEdit.Password)
+        form.addRow("パスワード", self.password)
+        form.addRow("確認", self.confirm)
+        layout.addLayout(form)
+
+        warn = QLabel("忘れると保管庫は開けません。復旧手段はありません。")
+        warn.setStyleSheet(f"color:{theme.WARN}; font-size:12px;")
+        warn.setWordWrap(True)
+        layout.addWidget(warn)
+
+        self.error = QLabel()
+        self.error.setStyleSheet(f"color:{theme.ACCENT}; font-size:12px;")
+        self.error.hide()
+        layout.addWidget(self.error)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
+        buttons.button(QDialogButtonBox.Ok).setText("設定")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def new_password(self) -> str:
+        return self.password.text()
+
+    def accept(self) -> None:
+        password = self.password.text()
+        if len(password) < 4:
+            self.error.setText("パスワードは 4 文字以上にしてください")
+            self.error.show()
+            return
+        if password != self.confirm.text():
+            self.error.setText("確認用パスワードが一致しません")
+            self.error.show()
+            return
+        super().accept()
 
 
 class PlayerSearchDialog(QDialog):

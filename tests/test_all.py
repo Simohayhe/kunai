@@ -106,6 +106,33 @@ def test_storage() -> None:
     v3.close()
     check("close で閉じる", not v3.is_open)
 
+    # 途中からのパスワード付け外し
+    d4 = Path(tempfile.mkdtemp())
+    v4 = Vault(d4)
+    v4.initialize()  # 最初はパスワード無し
+    v4.add(Account(label="残る子"))
+    check("最初はパスワード無し", not v4.needs_password)
+
+    v4.change_password("new-pw")
+    check("途中からパスワードを付けられる", v4.needs_password)
+    v4.close()
+    from vam.crypto import VaultLocked
+    try:
+        Vault(d4).open()
+        check("パスワード無しでは開けなくなる", False, "例外が出なかった")
+    except VaultLocked:
+        check("パスワード無しでは開けなくなる", True)
+
+    v5 = Vault(d4)
+    v5.open("new-pw")
+    check("正しいパスワードでは開ける", len(v5.accounts()) == 1)
+    v5.change_password(None)
+    check("途中からパスワードを外せる", not v5.needs_password)
+    v5.close()
+    v6 = Vault(d4)
+    v6.open()  # パスワード無しで開けるはず
+    check("外した後はパスワード無しで開ける", len(v6.accounts()) == 1)
+
 
 def test_session() -> None:
     section("セッション解析")
@@ -915,7 +942,9 @@ def test_ui() -> None:
     from vam.mock.demo_data import FIRST_PUUID, seed
     from vam.mock.fake_riot import FakeRiotEnv
     from vam.storage import Vault
-    from vam.ui.dialogs import AccountDialog, SetupDialog, UnlockDialog
+    from vam.ui.dialogs import (
+        AccountDialog, SettingsDialog, SetPasswordDialog, SetupDialog, UnlockDialog,
+    )
     from vam.ui.main_window import MainWindow
 
     QApplication.instance() or QApplication([])
@@ -1016,6 +1045,38 @@ def test_ui() -> None:
         unlock.accept()
         check("誤パスワードでダイアログが閉じない",
               not unlock.error.isHidden() and unlock.result() != QDialog.Accepted)
+
+        # マスターパスワードの付け外し UI
+        v4 = Vault(Path(tempfile.mkdtemp()))
+        v4.initialize()  # パスワード無しで開始
+        settings1 = SettingsDialog(
+            webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+            henrik_api_key="", current_version="0.0.0", vault=v4,
+        )
+        check("パスワード無しなら「設定する」",
+              settings1.password_button.text() == "設定する")
+        check("状態表示もパスワード無し",
+              "パスワードなし" in settings1.password_state_label.text())
+
+        set_pw = SetPasswordDialog()
+        set_pw.password.setText("ab")
+        set_pw.accept()
+        check("4文字未満は拒否", not set_pw.error.isHidden())
+        set_pw.error.hide()
+        set_pw.password.setText("new-master-pw")
+        set_pw.confirm.setText("違う値")
+        set_pw.accept()
+        check("確認が不一致なら拒否", not set_pw.error.isHidden())
+        set_pw.confirm.setText("new-master-pw")
+        check("一致すれば通る", set_pw.new_password() == "new-master-pw")
+
+        v4.change_password("new-master-pw")
+        settings2 = SettingsDialog(
+            webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+            henrik_api_key="", current_version="0.0.0", vault=v4,
+        )
+        check("設定後は「外す」", settings2.password_button.text() == "外す")
+        check("状態表示も更新", "設定済み" in settings2.password_state_label.text())
 
         window.close()
 

@@ -545,6 +545,7 @@ class MainWindow(QMainWindow):
             stay_signed_in=self.service.stay_signed_in,
             henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
+            vault=self.vault,
             parent=self,
         )
         dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
