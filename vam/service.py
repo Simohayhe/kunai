@@ -1109,6 +1109,22 @@ class AccountService:
             reports[acc.id] = self.refresh_account(acc, progress=tagged)
         return reports
 
+    def act_status(self, now: float | None = None) -> dict | None:
+        """今のアクト (コンペのシーズン) の名前と終了までの残り。取れなければ None。
+        {"name": "ACT V", "end": epoch 秒, "seconds_left": float}"""
+        now = time.time() if now is None else now
+        try:
+            acts = self.content.acts()
+        except content.ContentError:
+            return None
+        current = [a for a in acts if a["start"] <= now]
+        if not current:
+            return None
+        act = current[-1]
+        if act["end"] <= now:
+            return None   # 終了日が過ぎている (次のアクトの情報がまだ無い)
+        return {"name": act["name"], "end": act["end"], "seconds_left": act["end"] - now}
+
     def refresh_cycle(self, accounts: Iterable[Account], progress: Progress = _noop,
                       cancel_event=None, events: Events = None) -> dict[str, RefreshReport]:
         """アカウントを 1 つずつ Riot Client で起動 → 取得 → 停止、を繰り返す。

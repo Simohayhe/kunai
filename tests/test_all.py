@@ -1267,6 +1267,31 @@ def test_sort_modes() -> None:
         check("不正な並び順は拒否", True)
 
 
+def test_act_status() -> None:
+    section("アクトの残り日数")
+    from vam.service import AccountService
+    from vam.storage import Vault
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    acts = [{"uuid": "a", "name": "ACT IV", "start": 1000.0, "end": 5000.0},
+            {"uuid": "b", "name": "ACT V", "start": 5000.0, "end": 9000.0},
+            {"uuid": "c", "name": "ACT VI", "start": 9000.0, "end": 13000.0}]
+    svc.content.acts = lambda: acts
+    st = svc.act_status(now=6000.0)
+    check("今のアクトが分かる", st["name"] == "ACT V", str(st))
+    check("終了までの秒数", st["seconds_left"] == 3000.0)
+    check("次のアクトに入ったら切り替わる", svc.act_status(now=9500.0)["name"] == "ACT VI")
+    check("全部終わっていれば None", svc.act_status(now=20000.0) is None)
+    check("始まる前なら None", svc.act_status(now=10.0) is None)
+    from vam.riot import content as _content
+
+    def boom():
+        raise _content.ContentError("offline")
+    svc.content.acts = boom
+    check("取得できなければ None", svc.act_status(now=6000.0) is None)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1530,7 +1555,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status,
                test_status_notify, test_ui):
         try:
             fn()

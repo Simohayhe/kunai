@@ -125,7 +125,7 @@ class ContentCache:
 
     def acts(self) -> list[dict]:
         """アクト (ランクのシーズン単位) を開始日の古い順に。
-        [{"uuid", "name": "ACT V", "start": epoch 秒}]。ランクの履歴 (mmr の
+        [{"uuid", "name": "ACT V", "start": epoch 秒, "end": epoch 秒}]。ランクの履歴 (mmr の
         SeasonalInfoBySeasonID) はこの uuid で引かれている。"""
         from datetime import datetime
         data = self.fetch("seasons", "/seasons") or []
@@ -138,7 +138,13 @@ class ContentCache:
                     str(s.get("startTime", "")).replace("Z", "+00:00")).timestamp()
             except ValueError:
                 continue
-            out.append({"uuid": s["uuid"], "name": s.get("displayName", ""), "start": start})
+            try:
+                end = datetime.fromisoformat(
+                    str(s.get("endTime", "")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                end = 0.0
+            out.append({"uuid": s["uuid"], "name": s.get("displayName", ""),
+                        "start": start, "end": end})
         out.sort(key=lambda a: a["start"])
         return out
 

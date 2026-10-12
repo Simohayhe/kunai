@@ -96,6 +96,11 @@ class MainWindow(QMainWindow):
 
         self.check_for_update()
 
+        self._act_timer = QTimer(self)
+        self._act_timer.timeout.connect(self.update_act_countdown)
+        self._act_timer.start(10 * 60 * 1000)
+        self.update_act_countdown()
+
         self._account_refresh_timer = QTimer(self)
         self._account_refresh_timer.timeout.connect(self.auto_refresh_current_account)
         self._account_refresh_timer.start(ACCOUNT_AUTO_REFRESH_INTERVAL_MS)
@@ -161,6 +166,14 @@ class MainWindow(QMainWindow):
             f"color:{theme.TEXT_DIM}; font-size:11px; letter-spacing:2px; border:none;"
         )
         layout.addWidget(sub)
+        # 今のアクト (コンペ) が終わるまでの残り日数
+        self.act_label = QLabel()
+        self.act_label.setStyleSheet(
+            f"color:{theme.TEAL}; font-size:12px; font-weight:700;"
+            f" border:1px solid {theme.BORDER}; border-radius:9px; padding:1px 10px;"
+        )
+        self.act_label.hide()
+        layout.addWidget(self.act_label)
         layout.addStretch(1)
 
         self.env_label = QLabel()
@@ -450,6 +463,31 @@ class MainWindow(QMainWindow):
             if isinstance(w, AccountCard):
                 order.append(w.account.id)
         return order
+
+    # -- コンペ (アクト) の残り日数 ------------------------------------------
+    def update_act_countdown(self) -> None:
+        """今のアクトの終了までの残りを、ヘッダーに出す。取得はバックグラウンドで。"""
+        workers.run(self.service.act_status, on_done=self._on_act_status,
+                    on_error=lambda m: diagnostics.log(f"アクト情報の取得に失敗: {m}"))
+
+    def _on_act_status(self, status) -> None:
+        if not status:
+            self.act_label.hide()
+            return
+        left = status["seconds_left"]
+        if left >= 86400:
+            remain = f"あと {int(left // 86400)} 日"
+        elif left >= 3600:
+            remain = f"あと {int(left // 3600)} 時間"
+        else:
+            remain = "まもなく終了"
+        end = time.strftime("%m/%d %H:%M", time.localtime(status["end"]))
+        self.act_label.setText(f"{status['name']}　{remain}")
+        self.act_label.setToolTip(
+            f"コンペ {status['name']} の終了予定: {end}\n"
+            "(Riot の公開データによる予定です。実際の切り替わりは前後することがあります)"
+        )
+        self.act_label.show()
 
     def _held_text(self, account_id: str) -> str:
         errors = self._held.get(account_id)
