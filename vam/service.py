@@ -403,19 +403,21 @@ class AccountService:
         self.vault.save_settings(settings)
 
     def sorted_accounts(self) -> list[Account]:
-        """設定された並び順でアカウントを返す。"""
+        """設定された並び順でアカウントを返す。お気に入りは、どの並び順でも
+        必ず先頭にまとめる (お気に入りの中・それ以外の中で、並び順に従う)。"""
         accounts = self.vault.accounts()  # 保管庫の順 = 手動で並べた順
         mode = self.sort_mode
-        if mode == "manual":
-            return accounts
         if mode == "rank":
             # ランクの高い順。ランク無し (未ランク) は最後。同ランクは RR、次に使った順
-            return sorted(accounts, key=lambda a: (
+            accounts = sorted(accounts, key=lambda a: (
                 -(a.rank.tier if a.rank.tier > 2 else 0),
                 -(a.rank.rr if a.rank.tier > 2 else 0),
                 -a.last_used_at,
             ))
-        return sorted(accounts, key=lambda a: (not a.favorite, -a.last_used_at))
+        elif mode == "recent":
+            accounts = sorted(accounts, key=lambda a: -a.last_used_at)
+        # 安定ソートなので、お気に入りの中の順は上で決めた順のまま
+        return sorted(accounts, key=lambda a: not a.favorite)
 
     @property
     def henrik_api_key(self) -> str:
@@ -735,7 +737,7 @@ class AccountService:
     def switch(self, account: Account, launch_game: bool = True,
                force: bool = False, allow_autologin: bool = True,
                submit_login: bool = True, recapture: bool = True,
-               client_only: bool = False,
+               client_only: bool = False, mark_used: bool = True,
                progress: Progress = _noop, cancel_event=None) -> SwitchResult:
         # 進捗はログにも残す。固まったときにどこまで来たか分かるように。
         _ui_progress = progress
@@ -875,7 +877,9 @@ class AccountService:
                     raise ServiceError("キャンセルされました") from exc
                 warnings.append(f"自動入力に失敗しました: {exc}")
 
-        account.last_used_at = time.time()
+        if mark_used:
+            # 一括更新の入れ替えは「使った」ことにしない (使った順の並びを乱さない)
+            account.last_used_at = time.time()
         self.vault.update(account)
         progress(f"{account.display_name} に切り替えました")
 
@@ -1166,7 +1170,8 @@ class AccountService:
             try:
                 tagged(f"{acc.display_name}: Riot Client を起動中…")
                 self.switch(acc, launch_game=False, client_only=True, allow_autologin=False,
-                            recapture=True, progress=tagged, cancel_event=cancel_event)
+                            recapture=True, mark_used=False, progress=tagged,
+                            cancel_event=cancel_event)
                 emit({"kind": "client", "state": "ok"})
             except Exception as exc:
                 switch_error = exc
@@ -1196,7 +1201,8 @@ class AccountService:
                 # クライアントは起動しない (画面を残さない)。次に Riot Client を
                 # 立ち上げたとき、このアカウントでログインした状態になる。
                 self.switch(original, launch_game=False, client_only=False,
-                            allow_autologin=False, recapture=False, progress=progress)
+                            allow_autologin=False, recapture=False, mark_used=False,
+                            progress=progress)
             except Exception as exc:
                 diagnostics.log(f"refresh_cycle: 元のアカウントに戻せなかった: {exc}")
         return reports

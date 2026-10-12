@@ -269,6 +269,10 @@ def test_service() -> None:
         check("起動された", r.launched)
         check("last_used が入る", vault.get(a.id).last_used_at > 0)
 
+        before_used = vault.get(a.id).last_used_at
+        svc.switch(a, launch_game=False, mark_used=False)
+        check("mark_used=False なら使用順に反映しない", vault.get(a.id).last_used_at == before_used)
+
         svc.switch(b)
         check("B へ切り替え", svc.current_account().id == b.id)
         check("A のセッションは保持されたまま", svc.session_status(a).valid)
@@ -1154,6 +1158,7 @@ def test_refresh_cycle() -> None:
 
     def fake_switch(account, **kw):
         log.append(f"switch:{account.label}")
+        check(f"{account.label}: 更新の入れ替えは使用順に反映しない", kw.get("mark_used") is False)
         if account.label == "o":
             check("元のアカウントはクライアントを起動せず戻す",
                   kw.get("launch_game") is False and kw.get("client_only") is False)
@@ -1248,16 +1253,27 @@ def test_sort_modes() -> None:
 
     check("既定は お気に入り優先・使った順", names()[0] == "unranked" and names()[1] == "mid_lo", str(names()))
     svc.sort_mode = "rank"
-    check("ランク順 (高い順・同ランクはRR)",
-          names() == ["high", "mid_hi", "mid_lo", "low", "unranked"], str(names()))
+    check("ランク順 (高い順・同ランクはRR)。お気に入りは先頭",
+          names() == ["unranked", "high", "mid_hi", "mid_lo", "low"], str(names()))
     low.rank.tier = 27
     vault.update(low)
-    check("ランクが変われば並びも変わる", names()[0] == "low", str(names()))
+    check("ランクが変われば並びも変わる", names()[:2] == ["unranked", "low"], str(names()))
+    mid_hi.favorite = True
+    vault.update(mid_hi)
+    check("お気に入りはランクが低くても上 (その中はランク順)",
+          names()[:3] == ["mid_hi", "unranked", "low"], str(names()))
+    mid_hi.favorite = False
+    vault.update(mid_hi)
     check("設定は保存される", AccountService(vault).sort_mode == "rank")
 
     svc.sort_mode = "manual"
     vault.reorder([unranked.id, low.id, high.id, mid_lo.id, mid_hi.id])
     check("手動は保管庫の順", names() == ["unranked", "low", "high", "mid_lo", "mid_hi"], str(names()))
+    high.favorite = True
+    vault.update(high)
+    check("手動でもお気に入りは先頭", names()[:2] == ["unranked", "high"], str(names()))
+    high.favorite = False
+    vault.update(high)
     check("手動の順は再読込しても残る", [a.label for a in AccountService(vault).sorted_accounts()][:2]
           == ["unranked", "low"])
     try:
@@ -1417,10 +1433,12 @@ def test_ui() -> None:
         # 並べ替え: ドロップで手動順になり、順が保存される。ランク順は自動で並ぶ
         order = lambda: window._card_order()
         first, second, third, fourth = order()
+        nfav = sum(1 for i in order() if window.vault.get(i).favorite)
         window._on_card_dropped(fourth, 0)      # 末尾のカードを先頭へ
-        check("ドロップで先頭へ移る", order()[0] == fourth, str(order()))
+        check("お気に入りより上には行かない", order()[nfav] == fourth and
+              all(window.vault.get(i).favorite for i in order()[:nfav]), str(order()))
         check("ドロップで手動順に切り替わる", window.service.sort_mode == "manual")
-        check("並びが保管庫に保存される", [a.id for a in window.vault.accounts()] == order())
+        check("並びが保存される", [a.id for a in window.service.sorted_accounts()] == order())
         window._on_card_dropped(fourth, 4)      # 末尾へ
         check("末尾へ移せる", order()[-1] == fourth, str(order()))
         before = order()
