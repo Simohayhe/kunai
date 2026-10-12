@@ -699,6 +699,7 @@ class AccountService:
     def switch(self, account: Account, launch_game: bool = True,
                force: bool = False, allow_autologin: bool = True,
                submit_login: bool = True, recapture: bool = True,
+               client_only: bool = False,
                progress: Progress = _noop, cancel_event=None) -> SwitchResult:
         # 進捗はログにも残す。固まったときにどこまで来たか分かるように。
         _ui_progress = progress
@@ -759,7 +760,8 @@ class AccountService:
             session.clear_current()
 
         launched = False
-        if launch_game or method == "autologin":
+        if launch_game or method == "autologin" or client_only:
+            # client_only: ゲームは起動せず、Riot Client にログインさせるだけ
             progress("Riot Client を起動中…")
             launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
             launched = True
@@ -1021,7 +1023,8 @@ class AccountService:
         return account
 
     def refresh_account(self, account: Account, progress: Progress = _noop,
-                        steps: Iterable[str] = REFRESH_STEPS) -> RefreshReport:
+                        steps: Iterable[str] = REFRESH_STEPS,
+                        auth_error: Exception | None = None) -> RefreshReport:
         """ランク・戦績・スキンを、互いに独立に取りにいく。
 
         どれかが失敗しても次へ進み、失敗の理由を report に集める。全部
@@ -1029,6 +1032,8 @@ class AccountService:
         """
         steps = tuple(steps)
         ctx = _RefreshContext(self, account)
+        if auth_error is not None:
+            ctx._error = auth_error  # 認証が要るステップは、この理由で失敗扱いにする
         report = RefreshReport(account.id)
         runners = {
             "rank": lambda: self._refresh_rank(account, ctx, progress),
@@ -1056,6 +1061,61 @@ class AccountService:
             def tagged(msg: str, i=i) -> None:
                 progress(f"[{i}/{len(accounts)}] {msg}")
             reports[acc.id] = self.refresh_account(acc, progress=tagged)
+        return reports
+
+    def refresh_cycle(self, accounts: Iterable[Account], progress: Progress = _noop,
+                      cancel_event=None) -> dict[str, RefreshReport]:
+        """アカウントを 1 つずつ Riot Client で起動 → 取得 → 停止、を繰り返す。
+
+        現行の Riot Client のセッションは起動中のクライアントからしかトークンを
+        借りられないので、まとめて更新するには 1 アカウントずつ入れ替えるしかない。
+        VALORANT が起動していたら何もしない (勝手に落とさない)。ゲームは起動せず
+        Riot Client だけ使う。パスワードの自動入力には頼らない (失効していたら
+        そのアカウントは失敗として次へ)。終わったら、最初に入っていたアカウントを
+        元に戻す。
+        """
+        if process.game_running():
+            raise GameRunning("VALORANT が起動中です。終了してから一括更新してください。")
+        accounts = list(accounts)
+        original = None
+        try:
+            original = self.current_account()
+        except Exception:
+            pass
+
+        reports: dict[str, RefreshReport] = {}
+        total = len(accounts)
+        for i, acc in enumerate(accounts, 1):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+
+            def tagged(msg: str, i=i) -> None:
+                progress(f"[{i}/{total}] {msg}")
+
+            switch_error: Exception | None = None
+            try:
+                tagged(f"{acc.display_name}: Riot Client を起動中…")
+                self.switch(acc, launch_game=False, client_only=True, allow_autologin=False,
+                            recapture=True, progress=tagged, cancel_event=cancel_event)
+            except Exception as exc:
+                switch_error = exc
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            reports[acc.id] = self.refresh_account(acc, progress=tagged,
+                                                   auth_error=switch_error)
+            try:
+                process.stop_all()  # 次のアカウントの前に落とす
+            except Exception as exc:
+                diagnostics.log(f"refresh_cycle: 停止に失敗: {exc}")
+
+        # 一括更新の前に入っていたアカウントに戻す (切り替えで消えた状態の復元)
+        if original is not None and not (cancel_event is not None and cancel_event.is_set()):
+            try:
+                progress(f"{original.display_name} に戻しています…")
+                self.switch(original, launch_game=False, client_only=True,
+                            allow_autologin=False, recapture=False, progress=progress)
+            except Exception as exc:
+                diagnostics.log(f"refresh_cycle: 元のアカウントに戻せなかった: {exc}")
         return reports
 
     # -- 更新の各ステップ -----------------------------------------------------

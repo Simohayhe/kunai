@@ -1133,6 +1133,72 @@ def test_bulk_refresh() -> None:
         api.ValorantApi, henrik.find_matches, henrik.find_mmr_history = orig
 
 
+def test_refresh_cycle() -> None:
+    section("一括更新の入れ替え (起動 → 取得 → 停止)")
+    import threading
+    from vam.models import Account
+    from vam.riot import process
+    from vam.service import AccountService, GameRunning, RefreshReport, ServiceError
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    a, b, c, orig_acc = (Account(label=n, session_saved=True) for n in "abco")
+    for acc in (a, b, c, orig_acc):
+        vault.add(acc)
+
+    log: list[str] = []
+
+    def fake_switch(account, **kw):
+        log.append(f"switch:{account.label}")
+        check(f"{account.label}: ゲームは起動せずクライアントだけ",
+              kw.get("launch_game") is False and kw.get("client_only") is True)
+        check(f"{account.label}: パスワード自動入力には頼らない",
+              kw.get("allow_autologin") is False)
+        if account.label == "b":
+            raise ServiceError("セッションが失効しています")
+
+    def fake_refresh(account, progress=None, auth_error=None, **kw):
+        log.append(f"refresh:{account.label}:{'err' if auth_error else 'ok'}")
+        return RefreshReport(account.id)
+
+    saved = (process.game_running, process.stop_all)
+    svc.switch = fake_switch
+    svc.refresh_account = fake_refresh
+    svc.current_account = lambda: orig_acc
+    process.stop_all = lambda *a, **k: log.append("stop") or []
+    try:
+        process.game_running = lambda: True
+        try:
+            svc.refresh_cycle([a, b, c])
+            check("VALORANT 起動中は始めない", False, "例外が出なかった")
+        except GameRunning:
+            check("VALORANT 起動中は始めない", True)
+        check("起動中は何も触らない", log == [], str(log))
+
+        process.game_running = lambda: False
+        reports = svc.refresh_cycle([a, b, c])
+        check("全員分の結果", set(reports) == {a.id, b.id, c.id})
+        order = [x for x in log if x != "stop"]
+        check("1 件ずつ 切り替え → 取得", order[:6] == [
+            "switch:a", "refresh:a:ok", "switch:b", "refresh:b:err",
+            "switch:c", "refresh:c:ok"], str(order))
+        check("切り替えに失敗しても次のアカウントへ進む", "refresh:c:ok" in log)
+        check("切り替え失敗は認証エラーとして渡る", "refresh:b:err" in log)
+        check("毎回停止する", log.count("stop") == 3, str(log.count("stop")))
+        check("最後に元のアカウントへ戻す", order[-1] == "switch:o", str(order[-1]))
+
+        # キャンセルしたら続けない・元に戻さない
+        log.clear()
+        ev = threading.Event()
+        ev.set()
+        reports = svc.refresh_cycle([a, b], cancel_event=ev)
+        check("キャンセル済みなら何もしない", reports == {} and log == [], str(log))
+    finally:
+        process.game_running, process.stop_all = saved
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1366,7 +1432,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle,
                test_status_notify, test_ui):
         try:
             fn()

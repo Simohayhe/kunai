@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self._auto_refreshing = False
         # 一括更新で 3 つとも失敗したアカウント id -> {ステップ名: 理由} (保留)
         self._held: dict[str, dict[str, str]] = {}
+        self._cycling = False   # 一括更新で Riot Client を入れ替えている最中
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
         # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
         self._inventory_cache: dict[str, list] = {}
@@ -444,6 +445,8 @@ class MainWindow(QMainWindow):
     # 環境監視
     # ==================================================================
     def refresh_environment(self) -> None:
+        if self._cycling:
+            return  # 一括更新がクライアントを入れ替えている間は触らない
         env = self.service.environment()
 
         # 保存済みセッションを最新に保つ。refresh_token はクライアントが
@@ -900,6 +903,7 @@ class MainWindow(QMainWindow):
         if not self._busy or self._switch_cancelled:
             return
         self._switch_cancelled = True
+        self._cycling = False
         self._switch_token = None
         if self._switch_cancel_event is not None:
             self._switch_cancel_event.set()
@@ -1013,9 +1017,20 @@ class MainWindow(QMainWindow):
             self.select_account(account.id, force_reload=True)
 
     def refresh_all(self) -> None:
-        """全アカウントのランク・戦績・スキンをまとめて更新する。取れないものは
-        飛ばして次へ進み、3 つとも取れなかったアカウントは保留 (⚠) にする。"""
+        """全アカウントのランク・戦績・スキンをまとめて更新する。
+
+        Riot Client を 1 アカウントずつ起動 → 取得 → 停止で入れ替えていく。
+        取れないものは飛ばして次へ進み、3 つとも取れなかったアカウントは
+        保留 (⚠) にする。VALORANT が起動中なら始めない。
+        """
         if self._busy:
+            return
+        if riot_process.game_running():
+            QMessageBox.warning(
+                self, "VALORANT が起動中です",
+                "一括更新はアカウントを順番に切り替えるので、VALORANT を終了してから"
+                "実行してください。",
+            )
             return
         accounts = [a for a in self.vault.accounts()
                     if a.session_saved or (self.service.henrik_api_key and a.puuid)]
@@ -1025,15 +1040,42 @@ class MainWindow(QMainWindow):
                 "セッションが保存されたアカウントがありません。",
             )
             return
+        answer = QMessageBox.question(
+            self, "すべて更新",
+            f"{len(accounts)} 件を順番に Riot Client で起動 → 取得 → 停止します。\n"
+            "終わるまで Riot Client は使えません (1 件あたり数十秒かかります)。\n"
+            "取得できなかったものは飛ばして続けます。始めますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._cycling = True
+        self._switch_cancelled = False
+        token = object()
+        self._switch_token = token
+        self._switch_cancel_event = threading.Event()
         self._set_busy(True, f"{len(accounts)} 件を更新中…")
+        self.cancel_switch_button.setEnabled(True)
+        self.cancel_switch_button.setVisible(True)
         workers.run(
-            self.service.refresh_many, accounts,
-            on_done=self._on_refresh_all_done,
-            on_error=lambda m: self._error("更新に失敗しました", m),
-            on_progress=self.status.showMessage,
+            self.service.refresh_cycle, accounts, cancel_event=self._switch_cancel_event,
+            on_done=lambda reports: self._on_refresh_all_done(reports, token),
+            on_error=lambda m: self._on_refresh_all_failed(m, token),
+            on_progress=lambda m: self._on_switch_progress(m, token),
         )
 
-    def _on_refresh_all_done(self, reports: dict) -> None:
+    def _on_refresh_all_failed(self, message: str, token: object) -> None:
+        if self._switch_token is not token:
+            return
+        self._cycling = False
+        self.cancel_switch_button.setVisible(False)
+        self._error("更新に失敗しました", message)
+
+    def _on_refresh_all_done(self, reports: dict, token: object) -> None:
+        if self._switch_token is not token:
+            return  # キャンセル済み
+        self._cycling = False
+        self.cancel_switch_button.setVisible(False)
         held = {i: r.errors for i, r in reports.items() if r.held}
         partial = {i: r.errors for i, r in reports.items() if r.errors and not r.held}
         for account_id, report in reports.items():
