@@ -56,17 +56,17 @@ class RankBadge(QLabel):
             p.drawText(self.rect(), Qt.AlignCenter, label)
 
         if self._previous:
-            # 右下に「前」の札
+            # 右下に時計マーク (＝過去のランク)
             p.setOpacity(1.0)
-            tag = self.rect().adjusted(self.width() - 17, self.height() - 15,
-                                       0, 0)
-            p.setPen(Qt.NoPen)
+            d = 15
+            x, y = self.width() - d, self.height() - d
+            p.setPen(QPen(QColor(theme.BG), 1.5))
             p.setBrush(QColor(theme.WARN))
-            p.drawRoundedRect(tag, 3, 3)
-            p.setPen(QColor("#1a1408"))
-            f = p.font(); f.setBold(True); f.setPointSize(7)
-            p.setFont(f)
-            p.drawText(tag, Qt.AlignCenter, "前")
+            p.drawEllipse(x, y, d, d)
+            cx, cy = x + d / 2, y + d / 2
+            p.setPen(QPen(QColor("#1a1408"), 1.5, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(int(cx), int(cy), int(cx), int(cy - 4))       # 長針
+            p.drawLine(int(cx), int(cy), int(cx + 3), int(cy + 1))   # 短針
         p.end()
 
 
