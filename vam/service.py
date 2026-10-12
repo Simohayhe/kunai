@@ -1112,7 +1112,9 @@ class AccountService:
         if original is not None and not (cancel_event is not None and cancel_event.is_set()):
             try:
                 progress(f"{original.display_name} に戻しています…")
-                self.switch(original, launch_game=False, client_only=True,
+                # クライアントは起動しない (画面を残さない)。次に Riot Client を
+                # 立ち上げたとき、このアカウントでログインした状態になる。
+                self.switch(original, launch_game=False, client_only=False,
                             allow_autologin=False, recapture=False, progress=progress)
             except Exception as exc:
                 diagnostics.log(f"refresh_cycle: 元のアカウントに戻せなかった: {exc}")
@@ -1177,6 +1179,22 @@ class AccountService:
         if stats.fetch_error:
             # 保存済みは見られるが、今回の取得は失敗している
             raise ServiceError(stats.fetch_error)
+        self._prefetch_details(account, stats.matches)
+
+    def _prefetch_details(self, account: Account, rows: list[MatchListRow],
+                          limit: int = 5) -> None:
+        """直近の試合のスコアボードを保存しておく。ログインしていない
+        (最新を取れない) 状態でも、サブアカウントの試合詳細を開けるように。
+        失敗しても更新全体は失敗にしない。"""
+        saved = self.history.load(account.id).get("details") or {}
+        for row in rows[:limit]:
+            if row.match_id in saved:
+                continue
+            try:
+                self.match_detail(account, row.match_id)
+            except Exception as exc:
+                diagnostics.log(f"スコアボードの先読みに失敗: {exc}")
+                break  # 認証できない等。残りも同じなので打ち切る
 
     def _refresh_skins(self, account: Account, ctx: "_RefreshContext",
                        progress: Progress) -> None:

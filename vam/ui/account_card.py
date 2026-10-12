@@ -45,7 +45,7 @@ class RankBadge(QLabel):
             p.setPen(color)
             f = p.font(); f.setBold(True); f.setPointSize(11)
             p.setFont(f)
-            label = "-" if self._tier <= 2 else str(self._tier)
+            label = "？" if self._tier <= 2 else str(self._tier)
             p.drawText(self.rect(), Qt.AlignCenter, label)
         p.end()
 

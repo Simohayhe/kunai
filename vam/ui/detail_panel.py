@@ -122,7 +122,8 @@ class OverviewTab(QWidget):
     def update_account(self, account: Account, session_info=None, icon=None) -> None:
         rank = account.rank
         self.badge.set_rank(rank.tier, icon)
-        self.rank_name.setText(rank.tier_name or "Unranked")
+        # ランクに行ったことが無い (未ランク) アカウントは「？」
+        self.rank_name.setText(rank.tier_name if rank.tier > 2 else "？")
         self.rank_name.setToolTip(
             f"{rank.carried_from} の最終ランクです。今のアクトはまだランクが付いていません。"
             if rank.carried_from else "")
@@ -296,12 +297,12 @@ class HistoryTab(QWidget):
         if getattr(stats, "from_saved", False):
             label = f"（保存済み {time.strftime('%m/%d %H:%M', time.localtime(saved_at))}・更新中…）"
         elif error:
-            label = f"（保存済み {time.strftime('%m/%d %H:%M', time.localtime(saved_at))}・最新は取得できず）"
+            label = f"（保存済み {time.strftime('%m/%d %H:%M', time.localtime(saved_at))}）"
         else:
             label = f"（{mode}）"
         self.source_label.setText(label)
         self.source_label.setToolTip(
-            f"最新の取得に失敗したため、保存してある戦績を表示しています。\n{error}" if error else ""
+            f"このアカウントでは今は最新を取得できないため、保存してある戦績を表示しています。\n{error}" if error else ""
         )
         if not stats.games:
             self.summary.setVisible(False)

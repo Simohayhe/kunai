@@ -1080,6 +1080,8 @@ def test_bulk_refresh() -> None:
         check("スキンが入る", got.inventory.skin_level_ids == ["skins-1", "skins-2"])
         check("ウォレットが入る", got.wallet.vp == 100)
         check("戦績の JSON もできる", svc.history.path_for(acc.id).is_file())
+        check("スコアボードも先に保存される (ログインなしで開ける)",
+              "m1" in (svc.history.load(acc.id).get("details") or {}))
 
         # 2. 今のアクトにランクがあれば、それを使う
         snap.seasons["actC"] = {"tier": 16, "rr": 77, "wins": 5, "games": 8, "leaderboard": 0}
@@ -1152,8 +1154,12 @@ def test_refresh_cycle() -> None:
 
     def fake_switch(account, **kw):
         log.append(f"switch:{account.label}")
-        check(f"{account.label}: ゲームは起動せずクライアントだけ",
-              kw.get("launch_game") is False and kw.get("client_only") is True)
+        if account.label == "o":
+            check("元のアカウントはクライアントを起動せず戻す",
+                  kw.get("launch_game") is False and kw.get("client_only") is False)
+        else:
+            check(f"{account.label}: ゲームは起動せずクライアントだけ",
+                  kw.get("launch_game") is False and kw.get("client_only") is True)
         check(f"{account.label}: パスワード自動入力には頼らない",
               kw.get("allow_autologin") is False)
         if account.label == "b":
