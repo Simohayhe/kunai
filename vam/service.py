@@ -265,6 +265,9 @@ MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 
 
+# 進捗を UI に伝えるコールバック (イベントは dict)。None なら何もしない
+Events = Callable[[dict], None] | None
+
 REFRESH_STEPS = ("rank", "history", "skins")
 STEP_LABELS = {"rank": "ランク", "history": "戦績", "skins": "スキン"}
 
@@ -275,9 +278,11 @@ class RefreshReport:
     account_id: str
     errors: dict[str, str] = field(default_factory=dict)
 
+    cancelled: bool = False   # キャンセルで一部のステップを飛ばした
+
     @property
     def ok(self) -> bool:
-        return not self.errors
+        return not self.errors and not self.cancelled
 
     @property
     def held(self) -> bool:
@@ -1024,7 +1029,8 @@ class AccountService:
 
     def refresh_account(self, account: Account, progress: Progress = _noop,
                         steps: Iterable[str] = REFRESH_STEPS,
-                        auth_error: Exception | None = None) -> RefreshReport:
+                        auth_error: Exception | None = None,
+                        cancel_event=None, events: Events = None) -> RefreshReport:
         """ランク・戦績・スキンを、互いに独立に取りにいく。
 
         どれかが失敗しても次へ進み、失敗の理由を report に集める。全部
@@ -1040,12 +1046,21 @@ class AccountService:
             "history": lambda: self._refresh_history(account, progress),
             "skins": lambda: self._refresh_skins(account, ctx, progress),
         }
+        emit = events or (lambda _e: None)
         for step in steps:
+            if cancel_event is not None and cancel_event.is_set():
+                report.cancelled = True
+                emit({"kind": "step", "step": step, "state": "skipped"})
+                continue
+            emit({"kind": "step", "step": step, "state": "running"})
             try:
                 runners[step]()
+                emit({"kind": "step", "step": step, "state": "ok"})
             except Exception as exc:  # 1 つの失敗で他を止めない
                 report.errors[step] = str(exc) or type(exc).__name__
                 progress(f"{account.display_name}: {STEP_LABELS[step]}に失敗 — {report.errors[step]}")
+                emit({"kind": "step", "step": step, "state": "error",
+                      "error": report.errors[step]})
         ctx.apply_identity()
         if len(report.errors) < len(steps) or ctx.authenticated:
             self.vault.update(account)  # 取れた分 (ランク・所持品・ID) を書き戻す
@@ -1064,7 +1079,7 @@ class AccountService:
         return reports
 
     def refresh_cycle(self, accounts: Iterable[Account], progress: Progress = _noop,
-                      cancel_event=None) -> dict[str, RefreshReport]:
+                      cancel_event=None, events: Events = None) -> dict[str, RefreshReport]:
         """アカウントを 1 つずつ Riot Client で起動 → 取得 → 停止、を繰り返す。
 
         現行の Riot Client のセッションは起動中のクライアントからしかトークンを
@@ -1083,33 +1098,52 @@ class AccountService:
         except Exception:
             pass
 
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        emit = events or (lambda _e: None)
         reports: dict[str, RefreshReport] = {}
         total = len(accounts)
+        emit({"kind": "start", "total": total})
         for i, acc in enumerate(accounts, 1):
-            if cancel_event is not None and cancel_event.is_set():
+            if cancelled():
                 break
 
             def tagged(msg: str, i=i) -> None:
                 progress(f"[{i}/{total}] {msg}")
 
+            emit({"kind": "account", "index": i, "total": total, "id": acc.id,
+                  "name": acc.display_name})
             switch_error: Exception | None = None
+            emit({"kind": "client", "state": "running"})
             try:
                 tagged(f"{acc.display_name}: Riot Client を起動中…")
                 self.switch(acc, launch_game=False, client_only=True, allow_autologin=False,
                             recapture=True, progress=tagged, cancel_event=cancel_event)
+                emit({"kind": "client", "state": "ok"})
             except Exception as exc:
                 switch_error = exc
-            if cancel_event is not None and cancel_event.is_set():
+                emit({"kind": "client", "state": "error", "error": str(exc)})
+            if cancelled():
+                try:
+                    process.stop_all()
+                except Exception as exc:
+                    diagnostics.log(f"refresh_cycle: 停止に失敗: {exc}")
                 break
-            reports[acc.id] = self.refresh_account(acc, progress=tagged,
-                                                   auth_error=switch_error)
+            report = self.refresh_account(acc, progress=tagged, auth_error=switch_error,
+                                          cancel_event=cancel_event, events=emit)
+            reports[acc.id] = report
+            emit({"kind": "account_done", "id": acc.id, "held": report.held,
+                  "partial": bool(report.errors) and not report.held})
             try:
                 process.stop_all()  # 次のアカウントの前に落とす
             except Exception as exc:
                 diagnostics.log(f"refresh_cycle: 停止に失敗: {exc}")
 
-        # 一括更新の前に入っていたアカウントに戻す (切り替えで消えた状態の復元)
-        if original is not None and not (cancel_event is not None and cancel_event.is_set()):
+        # 一括更新の前に入っていたアカウントに戻す (切り替えで消えた状態の復元)。
+        # キャンセルしたときも、途中のアカウントのまま放置しないよう戻す。
+        if original is not None:
+            emit({"kind": "restoring", "name": original.display_name})
             try:
                 progress(f"{original.display_name} に戻しています…")
                 # クライアントは起動しない (画面を残さない)。次に Riot Client を

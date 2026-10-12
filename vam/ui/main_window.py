@@ -6,7 +6,7 @@ import threading
 import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
@@ -24,12 +24,16 @@ from .account_card import AccountCard
 from .detail_panel import DetailPanel
 from .dialogs import AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog
 from .icons import IconLoader
+from .refresh_progress import RefreshProgressBar
 
 STATUS_CHECK_INTERVAL_MS = 120_000
 ACCOUNT_AUTO_REFRESH_INTERVAL_MS = 180_000
 
 
 class MainWindow(QMainWindow):
+    # 一括更新のワーカースレッドから進捗を受け取る (キュー接続でメインスレッドへ)
+    refresh_event = Signal(object)
+
     def __init__(self, vault: Vault):
         super().__init__()
         self.vault = vault
@@ -52,6 +56,7 @@ class MainWindow(QMainWindow):
         # 一括更新で 3 つとも失敗したアカウント id -> {ステップ名: 理由} (保留)
         self._held: dict[str, dict[str, str]] = {}
         self._cycling = False   # 一括更新で Riot Client を入れ替えている最中
+        self._refresh_cancel_event: threading.Event | None = None
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
         # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
         self._inventory_cache: dict[str, list] = {}
@@ -72,6 +77,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(theme.STYLESHEET)
 
         self._build()
+        self.refresh_event.connect(self.refresh_progress.on_event, Qt.QueuedConnection)
         self._build_tray()
         self._load_rank_icons()
         self.reload_accounts()
@@ -102,6 +108,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # すべて更新の進捗バー。ウィンドウの一番上に、更新中だけ出る
+        self.refresh_progress = RefreshProgressBar()
+        self.refresh_progress.cancel_requested.connect(self.cancel_refresh_all)
+        layout.addWidget(self.refresh_progress)
         layout.addWidget(self._build_header())
         layout.addWidget(self._build_status_banner())
 
@@ -1050,32 +1060,42 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
         self._cycling = True
-        self._switch_cancelled = False
-        token = object()
-        self._switch_token = token
-        self._switch_cancel_event = threading.Event()
+        self._refresh_cancel_event = threading.Event()
         self._set_busy(True, f"{len(accounts)} 件を更新中…")
-        self.cancel_switch_button.setEnabled(True)
-        self.cancel_switch_button.setVisible(True)
+        self.refresh_progress.begin(len(accounts))
+
+        def emit(event: dict) -> None:
+            try:
+                self.refresh_event.emit(event)
+            except RuntimeError:
+                pass  # ウィンドウが閉じた後
+
         workers.run(
-            self.service.refresh_cycle, accounts, cancel_event=self._switch_cancel_event,
-            on_done=lambda reports: self._on_refresh_all_done(reports, token),
-            on_error=lambda m: self._on_refresh_all_failed(m, token),
-            on_progress=lambda m: self._on_switch_progress(m, token),
+            self.service.refresh_cycle, accounts,
+            cancel_event=self._refresh_cancel_event, events=emit,
+            on_done=self._on_refresh_all_done,
+            on_error=self._on_refresh_all_failed,
+            on_progress=self.status.showMessage,
         )
 
-    def _on_refresh_all_failed(self, message: str, token: object) -> None:
-        if self._switch_token is not token:
-            return
+    def cancel_refresh_all(self) -> None:
+        """すべて更新を中止する。実行中の 1 ステップが終わるのを待ち、
+        Riot Client を止めて元のアカウントのセッションを戻してから完了する。"""
+        if self._refresh_cancel_event is not None:
+            self._refresh_cancel_event.set()
+        self.status.showMessage("キャンセル中…")
+
+    def _on_refresh_all_failed(self, message: str) -> None:
         self._cycling = False
-        self.cancel_switch_button.setVisible(False)
+        self._refresh_cancel_event = None
+        self.refresh_progress.finish()
         self._error("更新に失敗しました", message)
 
-    def _on_refresh_all_done(self, reports: dict, token: object) -> None:
-        if self._switch_token is not token:
-            return  # キャンセル済み
+    def _on_refresh_all_done(self, reports: dict) -> None:
+        cancelled = bool(self._refresh_cancel_event and self._refresh_cancel_event.is_set())
         self._cycling = False
-        self.cancel_switch_button.setVisible(False)
+        self._refresh_cancel_event = None
+        self.refresh_progress.finish()
         held = {i: r.errors for i, r in reports.items() if r.held}
         partial = {i: r.errors for i, r in reports.items() if r.errors and not r.held}
         for account_id, report in reports.items():
@@ -1085,7 +1105,9 @@ class MainWindow(QMainWindow):
                 self._held.pop(account_id, None)
         done = len(reports) - len(held)
         msg = f"{len(reports)} 件を更新しました"
-        if held or partial:
+        if cancelled:
+            msg = f"キャンセルしました（{len(reports)} 件まで更新済み）"
+        elif held or partial:
             msg = f"{done} 件を更新（保留 {len(held)} 件"
             msg += f"・一部失敗 {len(partial)} 件）" if partial else "）"
         self._set_busy(False, msg)

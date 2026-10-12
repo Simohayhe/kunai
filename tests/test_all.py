@@ -1170,6 +1170,10 @@ def test_refresh_cycle() -> None:
         return RefreshReport(account.id)
 
     saved = (process.game_running, process.stop_all)
+    saved_refresh = svc.refresh_account  # 実物 (進捗イベントのテストで戻す)
+    svc._refresh_rank = lambda *a, **k: None
+    svc._refresh_history = lambda *a, **k: None
+    svc._refresh_skins = lambda *a, **k: None
     svc.switch = fake_switch
     svc.refresh_account = fake_refresh
     svc.current_account = lambda: orig_acc
@@ -1200,7 +1204,21 @@ def test_refresh_cycle() -> None:
         ev = threading.Event()
         ev.set()
         reports = svc.refresh_cycle([a, b], cancel_event=ev)
-        check("キャンセル済みなら何もしない", reports == {} and log == [], str(log))
+        check("キャンセル済みなら取得は始めない", reports == {}
+              and not any(x.startswith("refresh:") for x in log), str(log))
+        check("キャンセルでも元のアカウントのセッションは戻す", log == ["switch:o"], str(log))
+
+        # 進捗イベント
+        log.clear()
+        events: list[dict] = []
+        svc.refresh_account = saved_refresh
+        reports = svc.refresh_cycle([a], events=events.append)
+        kinds = [e["kind"] for e in events]
+        check("進捗: start→account→client", kinds[:3] == ["start", "account", "client"], str(kinds))
+        check("進捗: 件数と名前が入る", events[0]["total"] == 1 and events[1]["name"] == "a")
+        check("進捗: 3 ステップ分", [e["step"] for e in events if e["kind"] == "step"
+              and e["state"] == "running"] == ["rank", "history", "skins"])
+        check("進捗: 完了と復元", "account_done" in kinds and kinds[-1] == "restoring")
     finally:
         process.game_running, process.stop_all = saved
 
