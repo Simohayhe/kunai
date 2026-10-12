@@ -149,6 +149,8 @@ class MmrSnapshot:
     peak_tier: int = 0
     peak_season: str = ""
     season_id: str = ""
+    # act uuid -> {"tier","rr","wins","games","leaderboard"}。過去アクトの最終ランクを引くのに使う
+    seasons: dict[str, dict] = field(default_factory=dict)
     history: list[CompetitiveUpdate] = field(default_factory=list)
 
     @property
@@ -228,6 +230,13 @@ class ValorantApi:
             snap.leaderboard_rank = current.get("LeaderboardRank", 0) or 0
 
         for season_id, info in seasons.items():
+            snap.seasons[season_id] = {
+                "tier": info.get("CompetitiveTier", 0),
+                "rr": info.get("RankedRating", 0),
+                "wins": info.get("NumberOfWins", 0),
+                "games": info.get("NumberOfGames", 0),
+                "leaderboard": info.get("LeaderboardRank", 0) or 0,
+            }
             tiers = info.get("WinsByTier") or {}
             best = max((int(t) for t in tiers), default=info.get("CompetitiveTier", 0))
             if best > snap.peak_tier:

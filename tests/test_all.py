@@ -985,6 +985,154 @@ def test_history_persistence() -> None:
         check("保存も取得も無ければ例外", True)
 
 
+def test_bulk_refresh() -> None:
+    section("一括更新 (ランク・戦績・スキンを独立に)")
+    import time as _time
+    from vam.models import Account
+    from vam.riot import api, auth, henrik
+    from vam.service import AccountService, ServiceError
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    svc.henrik_api_key = "dummy-key"
+
+    now = _time.time()
+    day = 86400
+    acts = [{"uuid": "actA", "name": "ACT III", "start": now - 120 * day},
+            {"uuid": "actB", "name": "ACT IV", "start": now - 60 * day},
+            {"uuid": "actC", "name": "ACT V", "start": now - 1 * day}]
+    svc.content.acts = lambda: acts
+    svc.content.tier_names = lambda: {16: "ゴールド2", 0: "アンランク"}
+    svc.content.client_version = lambda: "v"
+
+    snap = api.MmrSnapshot(tier=0, rr=0, season_id="actC",
+                           seasons={"actB": {"tier": 16, "rr": 40, "wins": 9, "games": 15,
+                                             "leaderboard": 0},
+                                    "actC": {"tier": 0, "rr": 0, "wins": 1, "games": 2,
+                                             "leaderboard": 0}})
+
+    class FakeClient:
+        mmr_error = None
+        ent_error = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def mmr(self):
+            if FakeClient.mmr_error:
+                raise api.ApiError(FakeClient.mmr_error)
+            return snap
+
+        def wallet(self):
+            return {"vp": 100, "rp": 5, "kc": 0}
+
+        def entitlements(self, kind):
+            if FakeClient.ent_error:
+                raise api.ApiError(FakeClient.ent_error)
+            return [f"{kind}-1", f"{kind}-2"]
+
+    auth_calls = {"n": 0, "fail": False}
+
+    def fake_authenticate(account):
+        auth_calls["n"] += 1
+        if auth_calls["fail"]:
+            raise ServiceError("セッションが保存されていません")
+        return auth.AuthResult(access_token="t", entitlements_token="e", puuid="puuid1",
+                               region="ap", game_name="Self", tag_line="1234")
+
+    svc.authenticate = fake_authenticate
+
+    match = {
+        "metadata": {"match_id": "m1", "map": {"id": "map1", "name": "アセント"},
+                     "started_at": "2026-01-01T00:00:00.000Z"},
+        "players": [{"puuid": "puuid1", "team_id": "Red", "name": "Self", "tag": "1",
+                     "party_id": "p", "agent": {"id": "a1", "name": "ジェット"},
+                     "stats": {"score": 5000, "kills": 10, "deaths": 5, "assists": 1,
+                               "headshots": 4, "bodyshots": 4, "legshots": 2,
+                               "damage": {"dealt": 1500, "received": 1000}}}],
+        "teams": [{"team_id": "Red", "won": True, "rounds": {"won": 13, "lost": 5}}],
+    }
+    hstate = {"fail": False}
+
+    def fake_find_matches(puuid, region, api_key, count=20):
+        if hstate["fail"]:
+            raise henrik.HenrikError("API が落ちている")
+        return [match]
+
+    orig = (api.ValorantApi, henrik.find_matches, henrik.find_mmr_history)
+    api.ValorantApi = FakeClient
+    henrik.find_matches = fake_find_matches
+    henrik.find_mmr_history = lambda puuid, region, api_key: []
+    try:
+        # 1. 全部成功。今のアクトにランクが無いので前アクトの最終ランクが入る
+        acc = Account(label="bulk", puuid="puuid1", region="ap", session_saved=True)
+        vault.add(acc)
+        report = svc.refresh_account(acc)
+        check("全部成功なら errors が空", report.ok and not report.held, str(report.errors))
+        check("認証は 1 回で使い回す", auth_calls["n"] == 1, str(auth_calls["n"]))
+        got = vault.get(acc.id)
+        check("今のアクトが未ランクなら前アクトの最終ランクを出す",
+              got.rank.tier == 16 and got.rank.tier_name == "ゴールド2", str(got.rank))
+        check("どのアクトか分かる", got.rank.carried_from == "ACT IV", got.rank.carried_from)
+        check("今アクトの戦績は今アクトのもの", got.rank.games == 2 and got.rank.wins == 1)
+        check("スキンが入る", got.inventory.skin_level_ids == ["skins-1", "skins-2"])
+        check("ウォレットが入る", got.wallet.vp == 100)
+        check("戦績の JSON もできる", svc.history.path_for(acc.id).is_file())
+
+        # 2. 今のアクトにランクがあれば、それを使う
+        snap.seasons["actC"] = {"tier": 16, "rr": 77, "wins": 5, "games": 8, "leaderboard": 0}
+        svc.refresh_account(acc)
+        got = vault.get(acc.id)
+        check("今のアクトのランクを優先", got.rank.rr == 77 and got.rank.carried_from == "")
+        snap.seasons["actC"] = {"tier": 0, "rr": 0, "wins": 1, "games": 2, "leaderboard": 0}
+
+        # 3. ランクだけ失敗 -> 戦績とスキンは取れる
+        FakeClient.mmr_error = "mmr が 500"
+        hstate["fail"] = False
+        acc2 = Account(label="bulk2", puuid="puuid1", region="ap", session_saved=True)
+        vault.add(acc2)
+        report = svc.refresh_account(acc2)
+        check("失敗したのはランクだけ", list(report.errors) == ["rank"], str(report.errors))
+        check("保留にはならない", not report.held)
+        check("失敗の理由が入る", "mmr が 500" in report.errors["rank"])
+        got2 = vault.get(acc2.id)
+        check("ランクが失敗しても所持品は更新される", len(got2.inventory.skin_level_ids) == 2)
+        check("ランクが失敗しても戦績は取れる", svc.history.path_for(acc2.id).is_file())
+        FakeClient.mmr_error = None
+
+        # 4. スキンが全種類失敗 -> 前回の所持品を消さない
+        FakeClient.ent_error = "entitlements が 403"
+        report = svc.refresh_account(acc)
+        check("スキンだけ失敗", list(report.errors) == ["skins"], str(report.errors))
+        check("前回の所持品が残る",
+              vault.get(acc.id).inventory.skin_level_ids == ["skins-1", "skins-2"])
+        FakeClient.ent_error = None
+
+        # 5. 3 つとも失敗 -> 保留
+        auth_calls.update(n=0, fail=True)
+        hstate["fail"] = True
+        acc3 = Account(label="bulk3", puuid="puuid1", region="ap", session_saved=True)
+        vault.add(acc3)
+        report = svc.refresh_account(acc3)
+        check("3 つとも失敗なら保留", report.held and len(report.errors) == 3,
+              str(report.errors))
+        check("認証失敗は 1 回だけ試す", auth_calls["n"] == 1, str(auth_calls["n"]))
+        check("理由が各ステップに入る",
+              all(report.errors.get(k) for k in ("rank", "history", "skins")))
+
+        # 6. まとめて: 失敗が混ざっても全員分回る
+        auth_calls.update(n=0, fail=False)
+        hstate["fail"] = False
+        seen = []
+        reports = svc.refresh_many([acc, acc2], progress=seen.append)
+        check("全員分の結果が返る", set(reports) == {acc.id, acc2.id})
+        check("進捗に [1/2] が付く", any(m.startswith("[1/2]") for m in seen))
+    finally:
+        api.ValorantApi, henrik.find_matches, henrik.find_mmr_history = orig
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1218,7 +1366,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh,
                test_status_notify, test_ui):
         try:
             fn()

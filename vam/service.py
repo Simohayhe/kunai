@@ -265,6 +265,69 @@ MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 
 
+REFRESH_STEPS = ("rank", "history", "skins")
+STEP_LABELS = {"rank": "ランク", "history": "戦績", "skins": "スキン"}
+
+
+@dataclass
+class RefreshReport:
+    """1 アカウント分の更新結果。errors は失敗したステップ -> 理由。"""
+    account_id: str
+    errors: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    @property
+    def held(self) -> bool:
+        """3 つとも失敗した (＝保留にするアカウント)。"""
+        return len(self.errors) >= len(REFRESH_STEPS)
+
+
+class _RefreshContext:
+    """1 アカウントの更新中に、認証とクライアントを使い回す。認証に失敗した
+    ときは同じ例外を使い回し、ステップごとに認証をやり直さない。"""
+
+    def __init__(self, service: "AccountService", account: Account):
+        self.service = service
+        self.account = account
+        self.authenticated = False
+        self._result = None
+        self._client = None
+        self._error: Exception | None = None
+
+    def client(self) -> "api.ValorantApi":
+        if self._error is not None:
+            raise self._error
+        if self._client is None:
+            try:
+                self._result = self.service.authenticate(self.account)
+                try:
+                    version = self.service.content.client_version()
+                except content.ContentError:
+                    version = ""
+                region = self._result.region or self.account.region
+                self._client = api.ValorantApi(self._result, region=region,
+                                               client_version=version)
+                self.authenticated = True
+                self.apply_identity()  # 戦績の取得が puuid を使えるように、早めに反映
+            except Exception as exc:
+                self._error = exc
+                raise
+        return self._client
+
+    def apply_identity(self) -> None:
+        """認証で分かった puuid / Riot ID / リージョンをアカウントに反映する。"""
+        if self._result is None:
+            return
+        if self._result.puuid:
+            self.account.puuid = self._result.puuid
+        if self._result.riot_id:
+            self.account.riot_id = self._result.riot_id
+        self.account.region = self._result.region or self.account.region
+
+
 class AccountService:
     def __init__(self, vault: Vault):
         self.vault = vault
@@ -943,32 +1006,102 @@ class AccountService:
 
     def refresh(self, account: Account, fetch_inventory: bool = True,
                 progress: Progress = _noop) -> Account:
-        """ランク・ウォレット・所持品を取得してアカウントに書き戻す。"""
+        """ランク・ウォレット・所持品を取得してアカウントに書き戻す。
+        どれかが失敗したら例外にする (単体の更新用。まとめて更新は
+        refresh_account を使う)。"""
+        ctx = _RefreshContext(self, account)
         progress(f"{account.display_name}: 認証中…")
-        result = self.authenticate(account)
+        ctx.client()  # 認証できなければここで例外
+        self._refresh_rank(account, ctx, progress)
+        if fetch_inventory:
+            self._refresh_skins(account, ctx, progress)
+        ctx.apply_identity()
+        self.vault.update(account)
+        progress(f"{account.display_name}: 更新しました")
+        return account
 
-        if result.puuid:
-            account.puuid = result.puuid
-        if result.riot_id:
-            account.riot_id = result.riot_id
-        region = result.region or account.region
+    def refresh_account(self, account: Account, progress: Progress = _noop,
+                        steps: Iterable[str] = REFRESH_STEPS) -> RefreshReport:
+        """ランク・戦績・スキンを、互いに独立に取りにいく。
 
-        try:
-            version = self.content.client_version()
-        except content.ContentError:
-            version = ""
-        client = api.ValorantApi(result, region=region, client_version=version)
+        どれかが失敗しても次へ進み、失敗の理由を report に集める。全部
+        (3 つ) 失敗したときは report.held が True になる (呼び出し側が保留扱いにする)。
+        """
+        steps = tuple(steps)
+        ctx = _RefreshContext(self, account)
+        report = RefreshReport(account.id)
+        runners = {
+            "rank": lambda: self._refresh_rank(account, ctx, progress),
+            "history": lambda: self._refresh_history(account, progress),
+            "skins": lambda: self._refresh_skins(account, ctx, progress),
+        }
+        for step in steps:
+            try:
+                runners[step]()
+            except Exception as exc:  # 1 つの失敗で他を止めない
+                report.errors[step] = str(exc) or type(exc).__name__
+                progress(f"{account.display_name}: {STEP_LABELS[step]}に失敗 — {report.errors[step]}")
+        ctx.apply_identity()
+        if len(report.errors) < len(steps) or ctx.authenticated:
+            self.vault.update(account)  # 取れた分 (ランク・所持品・ID) を書き戻す
+        return report
 
+    def refresh_many(self, accounts: Iterable[Account],
+                     progress: Progress = _noop) -> dict[str, RefreshReport]:
+        """複数アカウントをまとめて更新する。アカウント id -> 結果。
+        (全部成功したものも含めて返すので、呼び側は report.errors で判断する。)"""
+        reports: dict[str, RefreshReport] = {}
+        accounts = list(accounts)
+        for i, acc in enumerate(accounts, 1):
+            def tagged(msg: str, i=i) -> None:
+                progress(f"[{i}/{len(accounts)}] {msg}")
+            reports[acc.id] = self.refresh_account(acc, progress=tagged)
+        return reports
+
+    # -- 更新の各ステップ -----------------------------------------------------
+    def _refresh_rank(self, account: Account, ctx: "_RefreshContext",
+                      progress: Progress) -> None:
+        client = ctx.client()
         progress(f"{account.display_name}: ランクを取得中…")
         mmr = client.mmr()
-        # ランク名は valorant-api の表示名を優先する（日本語になる）
-        names = self.content.tier_names()
+        names = self.content.tier_names()  # 日本語の表示名を優先
+        cur_tier, cur_rr, cur_wins, cur_games, cur_lb = (
+            mmr.tier, mmr.rr, mmr.wins, mmr.games, mmr.leaderboard_rank)
+        carried_from = ""
+        acts = []
+        try:
+            acts = self.content.acts()
+        except content.ContentError:
+            pass
+        if acts:
+            # 「今のアクト」はカレンダーで決める。mmr の LatestCompetitiveUpdate は
+            # 最後に遊んだ試合のシーズンなので、新アクトの開始直後は古いまま。
+            now = time.time()
+            current_idx = max((i for i, a in enumerate(acts) if a["start"] <= now), default=-1)
+            if current_idx >= 0:
+                this = mmr.seasons.get(acts[current_idx]["uuid"]) or {}
+                cur_tier, cur_rr = this.get("tier", 0), this.get("rr", 0)
+                cur_wins, cur_games = this.get("wins", 0), this.get("games", 0)
+                cur_lb = this.get("leaderboard", 0)
+            if cur_tier <= 2:
+                for a in reversed(acts[:max(current_idx, 0)]):
+                    prev = mmr.seasons.get(a["uuid"]) or {}
+                    if prev.get("tier", 0) > 2:
+                        cur_tier, cur_rr, carried_from = prev["tier"], 0, a["name"]
+                        break
+        elif cur_tier <= 2:
+            # アクト表が取れないときは、ランク付きの過去シーズンのどれかを使う
+            for info in reversed(list(mmr.seasons.values())):
+                if info.get("tier", 0) > 2:
+                    cur_tier, cur_rr, carried_from = info["tier"], 0, "前アクト"
+                    break
         account.rank = RankInfo(
-            tier=mmr.tier, tier_name=names.get(mmr.tier, mmr.tier_label), rr=mmr.rr,
+            tier=cur_tier, tier_name=names.get(cur_tier, api.tier_name(cur_tier)), rr=cur_rr,
             peak_tier=mmr.peak_tier,
             peak_tier_name=names.get(mmr.peak_tier, mmr.peak_tier_label),
-            peak_season=mmr.peak_season, leaderboard_rank=mmr.leaderboard_rank,
-            wins=mmr.wins, games=mmr.games, updated_at=time.time(),
+            peak_season=mmr.peak_season, leaderboard_rank=cur_lb,
+            wins=cur_wins, games=cur_games, updated_at=time.time(),
+            carried_from=carried_from,
         )
 
         progress(f"{account.display_name}: ウォレットを取得中…")
@@ -977,36 +1110,39 @@ class AccountService:
             account.wallet = WalletInfo(vp=w["vp"], rp=w["rp"], kc=w["kc"],
                                         updated_at=time.time())
         except api.ApiError:
-            pass
+            pass  # ウォレットだけの失敗はランク取得の失敗にしない
 
-        if fetch_inventory:
-            progress(f"{account.display_name}: 所持品を取得中…")
-            inv = InventoryInfo(updated_at=time.time())
-            for kind, attr in (("skins", "skin_level_ids"), ("agents", "agent_ids"),
-                               ("buddies", "buddy_ids"), ("cards", "card_ids"),
-                               ("titles", "title_ids"), ("sprays", "spray_ids")):
-                try:
-                    setattr(inv, attr, client.entitlements(kind))
-                except api.ApiError:
-                    pass
-            account.inventory = inv
+    def _refresh_history(self, account: Account, progress: Progress) -> None:
+        stats = self.match_stats(account, progress=progress)
+        if stats.fetch_error:
+            # 保存済みは見られるが、今回の取得は失敗している
+            raise ServiceError(stats.fetch_error)
 
-        account.region = region
-        self.vault.update(account)
-        progress(f"{account.display_name}: 更新しました")
-        return account
-
-    def refresh_many(self, accounts: Iterable[Account], fetch_inventory: bool = True,
-                     progress: Progress = _noop) -> dict[str, str]:
-        """複数アカウントをまとめて更新し、失敗したものの理由を返す。"""
-        errors: dict[str, str] = {}
-        for acc in accounts:
+    def _refresh_skins(self, account: Account, ctx: "_RefreshContext",
+                       progress: Progress) -> None:
+        client = ctx.client()
+        progress(f"{account.display_name}: 所持品を取得中…")
+        old = account.inventory
+        inv = InventoryInfo(
+            skin_level_ids=list(old.skin_level_ids), agent_ids=list(old.agent_ids),
+            buddy_ids=list(old.buddy_ids), card_ids=list(old.card_ids),
+            title_ids=list(old.title_ids), spray_ids=list(old.spray_ids),
+            updated_at=old.updated_at,
+        )
+        first_error: api.ApiError | None = None
+        got_any = False
+        for kind, attr in (("skins", "skin_level_ids"), ("agents", "agent_ids"),
+                           ("buddies", "buddy_ids"), ("cards", "card_ids"),
+                           ("titles", "title_ids"), ("sprays", "spray_ids")):
             try:
-                self.refresh(acc, fetch_inventory=fetch_inventory, progress=progress)
-            except (ServiceError, auth.AuthError, api.ApiError) as exc:
-                errors[acc.id] = str(exc)
-                progress(f"{acc.display_name}: 失敗 — {exc}")
-        return errors
+                setattr(inv, attr, client.entitlements(kind))
+                got_any = True
+            except api.ApiError as exc:
+                first_error = first_error or exc
+        if not got_any and first_error:
+            raise first_error  # 全部失敗なら前回の所持品を残して失敗扱い
+        inv.updated_at = time.time()
+        account.inventory = inv
 
     def match_history(self, account: Account, count: int = 20) -> list[api.CompetitiveUpdate]:
         result = self.authenticate(account)

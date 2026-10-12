@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from .. import diagnostics, updater
 from ..models import Account
 from ..riot import process as riot_process
-from ..service import AccountService
+from ..service import STEP_LABELS, AccountService
 from ..storage import Vault
 from ..version import __version__
 from . import theme, workers
@@ -49,6 +49,8 @@ class MainWindow(QMainWindow):
         self._switch_token: object | None = None
         self._switch_cancel_event: threading.Event | None = None
         self._auto_refreshing = False
+        # 一括更新で 3 つとも失敗したアカウント id -> {ステップ名: 理由} (保留)
+        self._held: dict[str, dict[str, str]] = {}
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
         # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
         self._inventory_cache: dict[str, list] = {}
@@ -360,6 +362,13 @@ class MainWindow(QMainWindow):
             self.detail_sub.clear()
         self._apply_filter(self.search.text())
 
+    def _held_text(self, account_id: str) -> str:
+        errors = self._held.get(account_id)
+        if not errors:
+            return ""
+        lines = [f"・{STEP_LABELS.get(step, step)}: {msg}" for step, msg in errors.items()]
+        return "一括更新で取得できなかったため保留にしています。\n" + "\n".join(lines)
+
     def _update_session_badges(self) -> None:
         for account_id, card in self.cards.items():
             account = self.vault.get(account_id)
@@ -370,6 +379,7 @@ class MainWindow(QMainWindow):
                 account,
                 session_ok=info.valid and not info.expired,
                 session_days=info.expires_in_days,
+                warning=self._held_text(account_id),
             )
             # refresh はアイコンを消すので、取得済みのものを貼り直す
             card.badge.set_rank(account.rank.tier, self._rank_pixmap(account.rank.tier))
@@ -945,6 +955,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_refreshed(self, account: Account) -> None:
+        self._held.pop(account.id, None)
         self._set_busy(False, f"{account.display_name} を更新しました")
         self._inventory_cache.pop(account.id, None)
         self.reload_accounts()
@@ -1002,7 +1013,12 @@ class MainWindow(QMainWindow):
             self.select_account(account.id, force_reload=True)
 
     def refresh_all(self) -> None:
-        accounts = [a for a in self.vault.accounts() if a.session_saved]
+        """全アカウントのランク・戦績・スキンをまとめて更新する。取れないものは
+        飛ばして次へ進み、3 つとも取れなかったアカウントは保留 (⚠) にする。"""
+        if self._busy:
+            return
+        accounts = [a for a in self.vault.accounts()
+                    if a.session_saved or (self.service.henrik_api_key and a.puuid)]
         if not accounts:
             QMessageBox.information(
                 self, "更新できません",
@@ -1017,19 +1033,50 @@ class MainWindow(QMainWindow):
             on_progress=self.status.showMessage,
         )
 
-    def _on_refresh_all_done(self, errors: dict) -> None:
-        self._set_busy(False, "更新が完了しました" if not errors
-                       else f"{len(errors)} 件が失敗しました")
+    def _on_refresh_all_done(self, reports: dict) -> None:
+        held = {i: r.errors for i, r in reports.items() if r.held}
+        partial = {i: r.errors for i, r in reports.items() if r.errors and not r.held}
+        for account_id, report in reports.items():
+            if report.held:
+                self._held[account_id] = dict(report.errors)
+            else:
+                self._held.pop(account_id, None)
+        done = len(reports) - len(held)
+        msg = f"{len(reports)} 件を更新しました"
+        if held or partial:
+            msg = f"{done} 件を更新（保留 {len(held)} 件"
+            msg += f"・一部失敗 {len(partial)} 件）" if partial else "）"
+        self._set_busy(False, msg)
         self._inventory_cache.clear()
         self.reload_accounts()
         if self.selected_id:
             self.select_account(self.selected_id, force_reload=True)
-        if errors:
-            lines = []
-            for account_id, message in errors.items():
-                account = self.vault.get(account_id)
-                lines.append(f"・{account.display_name if account else account_id}: {message}")
-            QMessageBox.warning(self, "一部が失敗しました", "\n".join(lines))
+        if held or partial:
+            self._show_refresh_summary(held, partial)
+
+    def _show_refresh_summary(self, held: dict, partial: dict) -> None:
+        def name(account_id: str) -> str:
+            account = self.vault.get(account_id)
+            return account.display_name if account else account_id
+
+        def detail(errors: dict) -> list[str]:
+            return [f"　{STEP_LABELS.get(step, step)}: {message}"
+                    for step, message in errors.items()]
+
+        lines: list[str] = []
+        if held:
+            lines.append("【保留】3 つとも取得できなかったアカウント (⚠ を付けました)")
+            for account_id, errors in held.items():
+                lines.append(f"・{name(account_id)}")
+                lines.extend(detail(errors))
+        if partial:
+            if lines:
+                lines.append("")
+            lines.append("【一部だけ失敗】取れた分は更新済みです")
+            for account_id, errors in partial.items():
+                lines.append(f"・{name(account_id)}")
+                lines.extend(detail(errors))
+        QMessageBox.warning(self, "一括更新の結果", "\n".join(lines))
 
     # -- 戦績と所持品 -------------------------------------------------------
     def load_history(self) -> None:

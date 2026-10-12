@@ -106,6 +106,11 @@ class AccountCard(QFrame):
         )
         self.current_pill.hide()
         top.addWidget(self.current_pill)
+        # 一括更新で 3 つとも失敗したアカウントに出す注意マーク (保留)
+        self.warn = QLabel("⚠")
+        self.warn.setStyleSheet(f"color:{theme.WARN}; font-size:13px; font-weight:700;")
+        self.warn.hide()
+        top.addWidget(self.warn)
         top.addStretch(1)
         text.addLayout(top)
 
@@ -136,8 +141,10 @@ class AccountCard(QFrame):
 
     # -- 表示更新 -----------------------------------------------------------
     def refresh(self, account: Account, session_ok: bool | None = None,
-                session_days: float = 0.0) -> None:
+                session_days: float = 0.0, warning: str = "") -> None:
         self.account = account
+        self.warn.setVisible(bool(warning))
+        self.warn.setToolTip(warning)
         self.name.setText(account.display_name)
         self.riot_id.setText(account.riot_id or account.username or "未設定")
         self.stripe.setStyleSheet(f"background:{account.color};")
@@ -167,7 +174,8 @@ class AccountCard(QFrame):
 
         parts = []
         if account.rank.tier > 2:
-            parts.append(account.rank.tier_name)
+            parts.append(account.rank.tier_name
+                         + (f"（{account.rank.carried_from}）" if account.rank.carried_from else ""))
         if account.last_used_at:
             parts.append(self._ago(account.last_used_at))
         elif account.session_saved:

@@ -18,6 +18,9 @@ class RankInfo:
     wins: int = 0
     games: int = 0
     updated_at: float = 0.0
+    # 今のアクトでまだランクが付いていないとき、過去アクトの最終ランクを
+    # 代わりに出している。その元のアクト名 ("ACT V" 等)。通常は空。
+    carried_from: str = ""
 
     @property
     def is_stale(self) -> bool:

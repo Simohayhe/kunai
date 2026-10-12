@@ -123,11 +123,16 @@ class OverviewTab(QWidget):
         rank = account.rank
         self.badge.set_rank(rank.tier, icon)
         self.rank_name.setText(rank.tier_name or "Unranked")
+        self.rank_name.setToolTip(
+            f"{rank.carried_from} の最終ランクです。今のアクトはまだランクが付いていません。"
+            if rank.carried_from else "")
         self.rank_name.setStyleSheet(
             f"font-size:20px; font-weight:700; color:{theme.rank_color(rank.tier)};"
         )
         sub = []
-        if rank.tier > 2:
+        if rank.carried_from:
+            sub.append(f"{rank.carried_from} の最終ランク")
+        elif rank.tier > 2:
             sub.append(f"{rank.rr} RR")
         if rank.leaderboard_rank:
             sub.append(f"ランキング {rank.leaderboard_rank} 位")
