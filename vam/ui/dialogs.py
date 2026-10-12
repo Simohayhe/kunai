@@ -332,9 +332,16 @@ class SettingsDialog(QDialog):
         layout.setSpacing(16)
         layout.setContentsMargins(22, 20, 22, 20)
 
+        title_row = QHBoxLayout()
         title = QLabel("設定")
         title.setObjectName("Title")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.guide_button = QPushButton("使い方ノート")
+        self.guide_button.setToolTip("このソフトの取扱説明書を開きます")
+        self.guide_button.clicked.connect(self._open_guide)
+        title_row.addWidget(self.guide_button)
+        layout.addLayout(title_row)
 
         # -- 通知 -----------------------------------------------------
         notify_title = QLabel("メンテナンス・障害通知")
@@ -467,6 +474,10 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _open_guide(self) -> None:
+        from .guide import GuideDialog
+        GuideDialog(parent=self).exec()
 
     def webhook_url(self) -> str:
         return self.webhook.text().strip()

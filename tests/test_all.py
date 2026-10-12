@@ -1487,6 +1487,19 @@ def test_ui() -> None:
         check("状態表示もパスワード無し",
               "パスワードなし" in settings1.password_state_label.text())
 
+        # 使い方ノート
+        from vam.ui.guide import SECTIONS, GuideDialog, build_html
+        check("設定に使い方ノートのボタンがある", settings1.guide_button.text() == "使い方ノート")
+        guide = GuideDialog()
+        check("目次と節の数が一致", guide.toc.count() == len(SECTIONS) and len(SECTIONS) >= 10)
+        html = build_html()
+        check("全ての節にアンカーがある", all(f'name="{a}"' in html for a, _, _ in SECTIONS))
+        check("アンカー名が重複しない", len({a for a, _, _ in SECTIONS}) == len(SECTIONS))
+        check("主要機能が載っている",
+              all(w in html for w in ("すべて更新", "並び順", "戦績", "セッション", "メンテナンス")))
+        guide.toc.setCurrentRow(3)
+        check("目次を選んでも落ちない", guide.toc.currentRow() == 3)
+
         set_pw = SetPasswordDialog()
         set_pw.password.setText("ab")
         set_pw.accept()
