@@ -7,10 +7,11 @@ import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSplitter, QSystemTrayIcon, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from .. import diagnostics, updater
@@ -20,7 +21,7 @@ from ..service import STEP_LABELS, AccountService
 from ..storage import Vault
 from ..version import __version__
 from . import theme, workers
-from .account_card import AccountCard
+from .account_card import AccountCard, AccountListContainer
 from .detail_panel import DetailPanel
 from .dialogs import AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog
 from .icons import IconLoader
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
 
         self._build()
         self.refresh_event.connect(self.refresh_progress.on_event, Qt.QueuedConnection)
+        self.refresh_event.connect(self._on_refresh_event, Qt.QueuedConnection)
         self._build_tray()
         self._load_rank_icons()
         self.reload_accounts()
@@ -233,11 +235,15 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(13, 13, 8, 13)
         layout.setSpacing(9)
 
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
         self.search = QLineEdit()
         self.search.setPlaceholderText("アカウントを検索")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
-        layout.addWidget(self.search)
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self._build_sort_button())
+        layout.addLayout(search_row)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
@@ -257,7 +263,9 @@ class MainWindow(QMainWindow):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        self.list_container = QWidget()
+        self.list_container = AccountListContainer()
+        self.list_container.scroll = scroll
+        self.list_container.dropped.connect(self._on_card_dropped)
         self.list_layout = QVBoxLayout(self.list_container)
         self.list_layout.setContentsMargins(0, 0, 6, 0)
         self.list_layout.setSpacing(6)
@@ -347,8 +355,7 @@ class MainWindow(QMainWindow):
             card.deleteLater()
         self.cards.clear()
 
-        accounts = self.vault.accounts()
-        accounts.sort(key=lambda a: (not a.favorite, -a.last_used_at))
+        accounts = self.service.sorted_accounts()
 
         for account in accounts:
             card = AccountCard(account)
@@ -373,6 +380,77 @@ class MainWindow(QMainWindow):
             self.detail_sub.clear()
         self._apply_filter(self.search.text())
 
+    # -- 並べ替え -----------------------------------------------------------
+    SORT_LABELS = {
+        "recent": "使った順 (お気に入り優先)",
+        "manual": "手動 (カードを長押ししてドラッグ)",
+        "rank": "ランク順 (自動)",
+    }
+
+    def _build_sort_button(self) -> QToolButton:
+        button = QToolButton()
+        button.setText("並び順 ▾")
+        button.setToolTip("アカウントの並び順。カードを長押しでドラッグすると手動で並べ替えられます")
+        button.setPopupMode(QToolButton.InstantPopup)
+        button.setCursor(Qt.PointingHandCursor)
+        menu = QMenu(button)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        self._sort_actions: dict[str, QAction] = {}
+        for mode, label in self.SORT_LABELS.items():
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(mode == self.service.sort_mode)
+            action.triggered.connect(lambda _checked=False, m=mode: self.set_sort_mode(m))
+            group.addAction(action)
+            menu.addAction(action)
+            self._sort_actions[mode] = action
+        button.setMenu(menu)
+        return button
+
+    def set_sort_mode(self, mode: str) -> None:
+        self.service.sort_mode = mode
+        for m, action in self._sort_actions.items():
+            action.setChecked(m == mode)
+        self._resort_cards()
+        self.status.showMessage(f"並び順: {self.SORT_LABELS[mode]}")
+
+    def _resort_cards(self) -> None:
+        """カードを作り直さずに、今の並び順に入れ替える (選択や詳細を壊さない)。"""
+        for index, account in enumerate(self.service.sorted_accounts()):
+            card = self.cards.get(account.id)
+            if card is None:
+                continue
+            self.list_layout.removeWidget(card)
+            self.list_layout.insertWidget(index, card)
+
+    def _on_card_dropped(self, account_id: str, index: int) -> None:
+        """カードをドロップした位置に移し、並び順を手動にして保存する。"""
+        visible = self.list_container.cards()
+        target = visible[index].account.id if index < len(visible) else None
+        current = self._card_order()
+        ids = [i for i in current if i != account_id]
+        if target == account_id:
+            ids.insert(current.index(account_id), account_id)   # 自分の位置に戻した
+        elif target is None:
+            ids.append(account_id)
+        else:
+            ids.insert(ids.index(target), account_id)
+        self.vault.reorder(ids)
+        if self.service.sort_mode != "manual":
+            self.set_sort_mode("manual")  # 自動の並びのまま動かしたら手動に切り替える
+        else:
+            self._resort_cards()
+            self.status.showMessage("並べ替えました")
+
+    def _card_order(self) -> list[str]:
+        order = []
+        for i in range(self.list_layout.count()):
+            w = self.list_layout.itemAt(i).widget()
+            if isinstance(w, AccountCard):
+                order.append(w.account.id)
+        return order
+
     def _held_text(self, account_id: str) -> str:
         errors = self._held.get(account_id)
         if not errors:
@@ -393,7 +471,8 @@ class MainWindow(QMainWindow):
                 warning=self._held_text(account_id),
             )
             # refresh はアイコンを消すので、取得済みのものを貼り直す
-            card.badge.set_rank(account.rank.tier, self._rank_pixmap(account.rank.tier))
+            card.badge.set_rank(account.rank.tier, self._rank_pixmap(account.rank.tier),
+                                previous=bool(account.rank.carried_from))
             card.set_current(account_id == self.current_id)
             card.set_selected(account_id == self.selected_id)
 
@@ -1078,6 +1157,13 @@ class MainWindow(QMainWindow):
             on_progress=self.status.showMessage,
         )
 
+    def _on_refresh_event(self, event: dict) -> None:
+        # 1 アカウント終わるごとに、カードのランク表示を更新し、並びを直す
+        if event.get("kind") == "account_done":
+            self._update_session_badges()
+            if self.service.sort_mode == "rank":
+                self._resort_cards()
+
     def cancel_refresh_all(self) -> None:
         """すべて更新を中止する。実行中の 1 ステップが終わるのを待ち、
         Riot Client を止めて元のアカウントのセッションを戻してから完了する。"""
@@ -1372,7 +1458,8 @@ class MainWindow(QMainWindow):
         for account_id, card in self.cards.items():
             account = self.vault.get(account_id)
             if account:
-                card.badge.set_rank(account.rank.tier, self._rank_pixmap(account.rank.tier))
+                card.badge.set_rank(account.rank.tier, self._rank_pixmap(account.rank.tier),
+                                    previous=bool(account.rank.carried_from))
 
     def _rank_pixmap(self, tier: int):
         url = self._rank_icons.get(tier)
@@ -1388,7 +1475,8 @@ class MainWindow(QMainWindow):
             for account_id, card in self.cards.items():
                 account = self.vault.get(account_id)
                 if account and account.rank.tier == tier:
-                    card.badge.set_rank(tier, pixmap)
+                    card.badge.set_rank(tier, pixmap, previous=bool(account.rank.carried_from))
             selected = self.vault.get(self.selected_id) if self.selected_id else None
             if selected and selected.rank.tier == tier:
-                self.detail.overview.badge.set_rank(tier, pixmap)
+                self.detail.overview.badge.set_rank(
+                    tier, pixmap, previous=bool(selected.rank.carried_from))

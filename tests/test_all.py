@@ -1223,6 +1223,50 @@ def test_refresh_cycle() -> None:
         process.game_running, process.stop_all = saved
 
 
+def test_sort_modes() -> None:
+    section("アカウントの並び順")
+    from vam.models import Account
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+
+    def acc(label, tier, rr, used=0.0, fav=False):
+        a = Account(label=label, favorite=fav, last_used_at=used)
+        a.rank.tier, a.rank.rr = tier, rr
+        vault.add(a)
+        return a
+
+    low = acc("low", 12, 10, used=1)
+    high = acc("high", 24, 50, used=2)
+    unranked = acc("unranked", 0, 0, used=3, fav=True)
+    mid_hi = acc("mid_hi", 18, 80, used=4)
+    mid_lo = acc("mid_lo", 18, 20, used=5)
+    names = lambda: [a.label for a in svc.sorted_accounts()]
+
+    check("既定は お気に入り優先・使った順", names()[0] == "unranked" and names()[1] == "mid_lo", str(names()))
+    svc.sort_mode = "rank"
+    check("ランク順 (高い順・同ランクはRR)",
+          names() == ["high", "mid_hi", "mid_lo", "low", "unranked"], str(names()))
+    low.rank.tier = 27
+    vault.update(low)
+    check("ランクが変われば並びも変わる", names()[0] == "low", str(names()))
+    check("設定は保存される", AccountService(vault).sort_mode == "rank")
+
+    svc.sort_mode = "manual"
+    vault.reorder([unranked.id, low.id, high.id, mid_lo.id, mid_hi.id])
+    check("手動は保管庫の順", names() == ["unranked", "low", "high", "mid_lo", "mid_hi"], str(names()))
+    check("手動の順は再読込しても残る", [a.label for a in AccountService(vault).sorted_accounts()][:2]
+          == ["unranked", "low"])
+    try:
+        svc.sort_mode = "bogus"
+        check("不正な並び順は拒否", False, "例外が出なかった")
+    except ValueError:
+        check("不正な並び順は拒否", True)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1345,6 +1389,23 @@ def test_ui() -> None:
         window.search.clear()
         check("検索クリアで全件", len(shown()) == 4, str(len(shown())))
 
+        # 並べ替え: ドロップで手動順になり、順が保存される。ランク順は自動で並ぶ
+        order = lambda: window._card_order()
+        first, second, third, fourth = order()
+        window._on_card_dropped(fourth, 0)      # 末尾のカードを先頭へ
+        check("ドロップで先頭へ移る", order()[0] == fourth, str(order()))
+        check("ドロップで手動順に切り替わる", window.service.sort_mode == "manual")
+        check("並びが保管庫に保存される", [a.id for a in window.vault.accounts()] == order())
+        window._on_card_dropped(fourth, 4)      # 末尾へ
+        check("末尾へ移せる", order()[-1] == fourth, str(order()))
+        before = order()
+        window._on_card_dropped(second, 99)
+        check("範囲外は末尾", order()[-1] == second and len(order()) == 4, str(order()))
+        window.set_sort_mode("rank")
+        ranked = [window.vault.get(i).rank.tier for i in order()]
+        check("ランク順 (高い順)", ranked == sorted(ranked, reverse=True), str(ranked))
+        window.service.sort_mode = "recent"
+
         # 選択と切り替え可否
         target = [a for a in vault.accounts() if a.label == "サブ3"][0]
         window.select_account(target.id)
@@ -1456,7 +1517,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes,
                test_status_notify, test_ui):
         try:
             fn()

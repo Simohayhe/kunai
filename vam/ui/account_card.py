@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QMimeData, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
@@ -22,10 +22,12 @@ class RankBadge(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self._tier = 0
         self._pixmap = None
+        self._previous = False   # 今のアクトのランクではなく、前のアクトの最終ランク
 
-    def set_rank(self, tier: int, pixmap=None) -> None:
+    def set_rank(self, tier: int, pixmap=None, previous: bool = False) -> None:
         self._tier = tier
         self._pixmap = pixmap
+        self._previous = previous
         self.update()
 
     def paintEvent(self, event):
@@ -33,7 +35,12 @@ class RankBadge(QLabel):
         p.setRenderHint(QPainter.Antialiasing)
         color = QColor(theme.rank_color(self._tier))
 
-        p.setPen(QPen(color, 2))
+        # 前アクトのランクは、破線の輪郭と薄い表示で「今のランクではない」と分かるようにする
+        pen = QPen(color, 2)
+        if self._previous:
+            pen.setStyle(Qt.DashLine)
+            p.setOpacity(0.7)
+        p.setPen(pen)
         p.setBrush(QColor(theme.BG))
         p.drawEllipse(1, 1, self.width() - 2, self.height() - 2)
 
@@ -47,6 +54,19 @@ class RankBadge(QLabel):
             p.setFont(f)
             label = "？" if self._tier <= 2 else str(self._tier)
             p.drawText(self.rect(), Qt.AlignCenter, label)
+
+        if self._previous:
+            # 右下に「前」の札
+            p.setOpacity(1.0)
+            tag = self.rect().adjusted(self.width() - 17, self.height() - 15,
+                                       0, 0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(theme.WARN))
+            p.drawRoundedRect(tag, 3, 3)
+            p.setPen(QColor("#1a1408"))
+            f = p.font(); f.setBold(True); f.setPointSize(7)
+            p.setFont(f)
+            p.drawText(tag, Qt.AlignCenter, "前")
         p.end()
 
 
@@ -62,6 +82,10 @@ class AccountCard(QFrame):
         self._selected = False
         self._current = False
         self.setObjectName("AccountCard")
+        self._press_pos = QPoint()
+        self._press_timer = QTimer(self)
+        self._press_timer.setSingleShot(True)
+        self._press_timer.timeout.connect(self._begin_drag)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -154,8 +178,8 @@ class AccountCard(QFrame):
         )
 
         rank = account.rank
-        self.badge.set_rank(rank.tier)
-        if rank.tier > 2:
+        self.badge.set_rank(rank.tier, previous=bool(rank.carried_from))
+        if rank.tier > 2 and not rank.carried_from:
             self.rr.setText(f"{rank.rr} RR")
             self.rr.show()
         else:
@@ -174,8 +198,10 @@ class AccountCard(QFrame):
 
         parts = []
         if account.rank.tier > 2:
-            parts.append(account.rank.tier_name
-                         + (f"（{account.rank.carried_from}）" if account.rank.carried_from else ""))
+            if account.rank.carried_from:
+                parts.append(f"前アクト: {account.rank.tier_name}（{account.rank.carried_from}）")
+            else:
+                parts.append(account.rank.tier_name)
         if account.last_used_at:
             parts.append(self._ago(account.last_used_at))
         elif account.session_saved:
@@ -242,12 +268,122 @@ class AccountCard(QFrame):
         )
 
     # -- 入力 ---------------------------------------------------------------
+    # 長押しで並べ替えのドラッグを始める
+    LONG_PRESS_MS = 450
+    MOVE_TOLERANCE = 6
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.clicked.emit(self.account.id)
+            self._press_pos = event.position().toPoint()
+            self._press_timer.start(self.LONG_PRESS_MS)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 長押しの前に動かしたら (スクロール等のつもり) ドラッグにしない
+        if (self._press_timer.isActive() and
+                (event.position().toPoint() - self._press_pos).manhattanLength()
+                > self.MOVE_TOLERANCE):
+            self._press_timer.stop()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_timer.stop()
+        super().mouseReleaseEvent(event)
+
+    def _begin_drag(self) -> None:
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(AccountListContainer.MIME, self.account.id.encode("utf-8"))
+        drag.setMimeData(mime)
+        pixmap = self.grab()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        drag.exec(Qt.MoveAction)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.switch_requested.emit(self.account.id)
         super().mouseDoubleClickEvent(event)
+
+
+class AccountListContainer(QWidget):
+    """アカウントカードを縦に並べる入れ物。カードのドロップを受けて並べ替える。"""
+
+    MIME = "application/x-kunai-account"
+    dropped = Signal(str, int)   # ドラッグしたアカウント id, 挿入位置 (見えているカードの何番目の前か)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.scroll = None          # 端に寄せたときに自動スクロールする QScrollArea
+        self._line_y: int | None = None
+
+    def cards(self) -> list["AccountCard"]:
+        layout = self.layout()
+        out = []
+        for i in range(layout.count()):
+            w = layout.itemAt(i).widget()
+            if isinstance(w, AccountCard) and not w.isHidden():
+                out.append(w)
+        return out
+
+    def index_at(self, y: int) -> int:
+        cards = self.cards()
+        for i, card in enumerate(cards):
+            if y < card.geometry().center().y():
+                return i
+        return len(cards)
+
+    def _line_for(self, index: int) -> int | None:
+        cards = self.cards()
+        if not cards:
+            return None
+        if index < len(cards):
+            return cards[index].geometry().top() - 3
+        return cards[-1].geometry().bottom() + 3
+
+    def _accepts(self, event) -> bool:
+        return event.mimeData().hasFormat(self.MIME)
+
+    def dragEnterEvent(self, event):
+        if self._accepts(event):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if not self._accepts(event):
+            return
+        y = int(event.position().y())
+        self._line_y = self._line_for(self.index_at(y))
+        self.update()
+        if self.scroll is not None:
+            bar = self.scroll.verticalScrollBar()
+            view_y = y - bar.value()
+            edge = 40
+            if view_y < edge:
+                bar.setValue(bar.value() - 18)
+            elif view_y > self.scroll.viewport().height() - edge:
+                bar.setValue(bar.value() + 18)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._line_y = None
+        self.update()
+
+    def dropEvent(self, event):
+        if not self._accepts(event):
+            return
+        account_id = bytes(event.mimeData().data(self.MIME)).decode("utf-8")
+        index = self.index_at(int(event.position().y()))
+        self._line_y = None
+        self.update()
+        event.acceptProposedAction()
+        self.dropped.emit(account_id, index)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._line_y is not None:
+            p = QPainter(self)
+            p.setPen(QPen(QColor(theme.ACCENT), 3))
+            p.drawLine(4, self._line_y, self.width() - 10, self._line_y)
+            p.end()

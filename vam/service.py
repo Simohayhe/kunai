@@ -263,6 +263,9 @@ SETTING_LOGIN_STEP_DELAY = "login_step_delay"
 DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
+SETTING_SORT_MODE = "sort_mode"
+# アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
+SORT_MODES = ("recent", "manual", "rank")
 
 
 # 進捗を UI に伝えるコールバック (イベントは dict)。None なら何もしない
@@ -385,6 +388,34 @@ class AccountService:
         settings = self.vault.settings()
         settings[SETTING_DISCORD_MENTION] = value.strip()
         self.vault.save_settings(settings)
+
+    @property
+    def sort_mode(self) -> str:
+        mode = str(self.vault.settings().get(SETTING_SORT_MODE, "recent"))
+        return mode if mode in SORT_MODES else "recent"
+
+    @sort_mode.setter
+    def sort_mode(self, value: str) -> None:
+        if value not in SORT_MODES:
+            raise ValueError(value)
+        settings = self.vault.settings()
+        settings[SETTING_SORT_MODE] = value
+        self.vault.save_settings(settings)
+
+    def sorted_accounts(self) -> list[Account]:
+        """設定された並び順でアカウントを返す。"""
+        accounts = self.vault.accounts()  # 保管庫の順 = 手動で並べた順
+        mode = self.sort_mode
+        if mode == "manual":
+            return accounts
+        if mode == "rank":
+            # ランクの高い順。ランク無し (未ランク) は最後。同ランクは RR、次に使った順
+            return sorted(accounts, key=lambda a: (
+                -(a.rank.tier if a.rank.tier > 2 else 0),
+                -(a.rank.rr if a.rank.tier > 2 else 0),
+                -a.last_used_at,
+            ))
+        return sorted(accounts, key=lambda a: (not a.favorite, -a.last_used_at))
 
     @property
     def henrik_api_key(self) -> str:

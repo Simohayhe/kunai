@@ -121,9 +121,11 @@ class OverviewTab(QWidget):
 
     def update_account(self, account: Account, session_info=None, icon=None) -> None:
         rank = account.rank
-        self.badge.set_rank(rank.tier, icon)
+        self.badge.set_rank(rank.tier, icon, previous=bool(rank.carried_from))
         # ランクに行ったことが無い (未ランク) アカウントは「？」
-        self.rank_name.setText(rank.tier_name if rank.tier > 2 else "？")
+        self.rank_name.setText(
+            (rank.tier_name + "（前アクト）" if rank.carried_from else rank.tier_name)
+            if rank.tier > 2 else "？")
         self.rank_name.setToolTip(
             f"{rank.carried_from} の最終ランクです。今のアクトはまだランクが付いていません。"
             if rank.carried_from else "")
