@@ -5,10 +5,11 @@ UI からはここだけを呼ぶ。進捗はコールバックで文字列を�
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Callable, Iterable
 
 from . import diagnostics
+from .history_store import HistoryStore
 from .match_cache import MatchCache
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
@@ -20,6 +21,47 @@ Progress = Callable[[str], None]
 
 def _noop(_: str) -> None:
     pass
+
+
+def _merge_rows(saved: list[MatchListRow], fresh: list[MatchListRow]) -> list[MatchListRow]:
+    """保存済みの行に新しく取れた行を重ねる (同じ試合は新しい方で置き換え)。
+    新しい方に RR の情報が無いとき (RR 履歴に載っていない) は、保存済みの
+    RR を引き継ぐ。開始時刻の新しい順に返す。"""
+    by_id = {r.match_id: r for r in saved}
+    for row in fresh:
+        old = by_id.get(row.match_id)
+        if old and not row.tier_after and old.tier_after:
+            row.tier_after, row.rr_after, row.rr_earned = (
+                old.tier_after, old.rr_after, old.rr_earned)
+        by_id[row.match_id] = row
+    return sorted(by_id.values(), key=lambda r: -r.started_at)
+
+
+def _aggregate_rows(rows: list[MatchListRow], source: str) -> MatchStats:
+    """行から HS 率・エージェント別/マップ別勝率を集計する。"""
+    stats = MatchStats(matches=list(rows), source=source)
+    agent_buckets: dict[str, AgentStat] = {}
+    map_buckets: dict[str, MapStat] = {}
+    headshots = bodyshots = legshots = 0
+    for r in rows:
+        stats.games += 1
+        stats.wins += int(r.won)
+        headshots += r.headshots
+        bodyshots += r.bodyshots
+        legshots += r.legshots
+        agent_name = r.agent_name or "不明なエージェント"
+        agent = agent_buckets.setdefault(agent_name, AgentStat(name=agent_name))
+        agent.games += 1
+        agent.wins += int(r.won)
+        map_name = r.map_name or "不明なマップ"
+        map_stat = map_buckets.setdefault(map_name, MapStat(name=map_name))
+        map_stat.games += 1
+        map_stat.wins += int(r.won)
+    total_shots = headshots + bodyshots + legshots
+    stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
+    stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
+    stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
+    return stats
 
 
 def _shots_to_pct(stats: dict) -> float:
@@ -99,6 +141,12 @@ class MatchListRow:
     placement: int = 0
     headshot_pct: float = 0.0
     damage_delta: int = 0
+    # 保存した行だけで集計・表示できるよう、名前と弾数も持っておく
+    agent_name: str = ""
+    map_name: str = ""
+    headshots: int = 0
+    bodyshots: int = 0
+    legshots: int = 0
 
     @property
     def tier_after_name(self) -> str:
@@ -174,6 +222,11 @@ class MatchStats:
     by_map: list[MapStat] = field(default_factory=list)
     # "api" (HenrikDev、サインイン不要) / "local" (ローカル API、要サインイン)
     source: str = "local"
+    # 保存済みの戦績を出しているとき: 最後に取得できた時刻 (epoch 秒)。
+    # 最新の取得に失敗したときは、その理由が fetch_error に入る。
+    saved_at: float = 0.0
+    fetch_error: str = ""
+    from_saved: bool = False
 
     @property
     def win_rate(self) -> float:
@@ -217,6 +270,8 @@ class AccountService:
         self.vault = vault
         self.content = content.ContentCache(vault.app_dir / "cache")
         self.match_cache = MatchCache(vault.app_dir / "cache")
+        # アカウントごとの戦績 JSON (history/<account.id>.json)
+        self.history = HistoryStore(vault.app_dir / "history")
         # HenrikDev モードで戦績一覧を取ったときの生データ。スコアボードを
         # 開くときに (アプリを再起動していなければ) 取り直さずに使う。
         self._henrik_raw_matches: dict[str, dict] = {}
@@ -963,19 +1018,82 @@ class AccountService:
                                  client_version=version)
         return client.competitive_history(count=count)
 
+    # 保存する戦績の上限。古いものから捨てる。
+    MAX_SAVED_MATCHES = 100
+
     def match_stats(self, account: Account, count: int = 20,
                     progress: Progress = _noop) -> MatchStats:
-        """HS 率・エージェント別/マップ別勝率を、直近の試合から集計する。
+        """HS 率・エージェント別/マップ別勝率と試合一覧を返す。
 
-        HenrikDev API キーが設定されていれば、そちら (API モード) を使う。
-        自分のセッションと違い、サインインしていないアカウントでも puuid
-        さえ分かれば取得できる。キーが無ければ、これまで通りローカル API
-        (サインインモード。今ログインしているアカウントでしか使えない)
-        にフォールバックする。
+        取得できた試合は、アカウントごとの JSON (history/<id>.json) に
+        足していく。取得に失敗しても (そのアカウントにログインしていない、
+        ネットワークが無い等)、保存済みの分があればそれを返し、失敗した
+        理由は MatchStats.fetch_error に入れる。保存が一つも無いときだけ
+        例外にする。
+
+        取得元: HenrikDev API キーがあれば API モード (サインイン不要)、
+        無ければローカル API のサインインモード (ログイン中のアカウントのみ)。
         """
-        if self.henrik_api_key:
-            return self._match_stats_via_henrik(account, count, progress)
-        return self._match_stats_via_local_api(account, count, progress)
+        source = "api" if self.henrik_api_key else "local"
+        fresh: list[MatchListRow] = []
+        error: Exception | None = None
+        try:
+            if source == "api":
+                fresh = self._fetch_rows_via_henrik(account, count, progress)
+            else:
+                fresh = self._fetch_rows_via_local_api(account, count, progress)
+        except Exception as exc:  # 取れなくても保存済みを見せたいので広く受ける
+            error = exc
+
+        saved_rows, saved_at, _ = self._load_saved(account)
+        if fresh:
+            merged = _merge_rows(saved_rows, fresh)[: self.MAX_SAVED_MATCHES]
+            saved_at = self._save_rows(account, merged, source)
+        else:
+            merged = saved_rows
+        if not merged and error is not None:
+            raise error
+
+        stats = _aggregate_rows(merged, source)
+        stats.saved_at = saved_at
+        stats.fetch_error = str(error) if error is not None else ""
+        return stats
+
+    def saved_match_stats(self, account: Account) -> MatchStats | None:
+        """保存済みの戦績だけを返す (通信しない)。無ければ None。
+        画面を開いた瞬間に出して、最新の取得は裏で走らせるために使う。"""
+        rows, saved_at, source = self._load_saved(account)
+        if not rows:
+            return None
+        stats = _aggregate_rows(rows, source or "local")
+        stats.saved_at = saved_at
+        stats.from_saved = True
+        return stats
+
+    def _load_saved(self, account: Account) -> tuple[list[MatchListRow], float, str]:
+        data = self.history.load(account.id)
+        names = {f.name for f in fields(MatchListRow)}
+        rows: list[MatchListRow] = []
+        for raw in data.get("matches") or []:
+            if isinstance(raw, dict):
+                rows.append(MatchListRow(**{k: v for k, v in raw.items() if k in names}))
+        rows.sort(key=lambda r: -r.started_at)
+        return rows, float(data.get("saved_at") or 0.0), str(data.get("source") or "")
+
+    def _save_rows(self, account: Account, rows: list[MatchListRow], source: str) -> float:
+        now = time.time()
+        keep = {r.match_id for r in rows}
+
+        def mutate(data: dict) -> None:
+            data["saved_at"] = now
+            data["source"] = source
+            data["matches"] = [asdict(r) for r in rows]
+            # 一覧から落ちた試合のスコアボードも一緒に捨てる
+            details = data.get("details") or {}
+            data["details"] = {k: v for k, v in details.items() if k in keep}
+
+        self.history.update(account.id, mutate)
+        return now
 
     def _resolve_henrik_identity(self, account: Account) -> tuple[str, str]:
         """HenrikDev 向けの (puuid, region) を用意する。
@@ -1006,8 +1124,8 @@ class AccountService:
             region = found.region or region
         return puuid, region
 
-    def _match_stats_via_henrik(self, account: Account, count: int,
-                                progress: Progress) -> MatchStats:
+    def _fetch_rows_via_henrik(self, account: Account, count: int,
+                               progress: Progress) -> list[MatchListRow]:
         api_key = self.henrik_api_key
         puuid, region = self._resolve_henrik_identity(account)
 
@@ -1029,11 +1147,6 @@ class AccountService:
             maps = {}
 
         rows: list[MatchListRow] = []
-        stats = MatchStats(matches=[], source="api")
-        agent_buckets: dict[str, AgentStat] = {}
-        map_buckets: dict[str, MapStat] = {}
-        headshots = bodyshots = legshots = 0
-
         for m in matches_raw:
             meta = m.get("metadata") or {}
             match_id = meta.get("match_id", "")
@@ -1050,7 +1163,6 @@ class AccountService:
             teams = m.get("teams") or []
             team = next((t for t in teams if t.get("team_id") == team_id), None)
             enemy_team = next((t for t in teams if t.get("team_id") != team_id), None)
-            won = bool(team and team.get("won"))
             pstats = player.get("stats") or {}
             agent_info = player.get("agent") or {}
             damage = pstats.get("damage") or {}
@@ -1071,7 +1183,7 @@ class AccountService:
                 tier_after=tier_info.get("id", 0),
                 rr_after=rr_info.get("rr", 0),
                 rr_earned=rr_info.get("last_change", 0),
-                won=won,
+                won=bool(team and team.get("won")),
                 kills=pstats.get("kills", 0), deaths=pstats.get("deaths", 0),
                 assists=pstats.get("assists", 0), score=pstats.get("score", 0),
                 team_score=(team or {}).get("rounds", {}).get("won", 0),
@@ -1079,37 +1191,19 @@ class AccountService:
                 placement=placement,
                 headshot_pct=_shots_to_pct(pstats),
                 damage_delta=damage.get("dealt", 0) - damage.get("received", 0),
+                agent_name=(agent_info.get("name")
+                            or agents.get(agent_info.get("id", ""), {}).get("name")
+                            or ""),
+                map_name=(map_info.get("name")
+                          or maps.get(map_info.get("id", ""), {}).get("name") or ""),
+                headshots=pstats.get("headshots", 0),
+                bodyshots=pstats.get("bodyshots", 0),
+                legshots=pstats.get("legshots", 0),
             ))
+        return rows
 
-            stats.games += 1
-            stats.wins += int(won)
-            headshots += pstats.get("headshots", 0)
-            bodyshots += pstats.get("bodyshots", 0)
-            legshots += pstats.get("legshots", 0)
-
-            agent_name = (agent_info.get("name")
-                         or agents.get(agent_info.get("id", ""), {}).get("name")
-                         or "不明なエージェント")
-            agent = agent_buckets.setdefault(agent_name, AgentStat(name=agent_name))
-            agent.games += 1
-            agent.wins += int(won)
-
-            map_name = (map_info.get("name")
-                       or maps.get(map_info.get("id", ""), {}).get("name")
-                       or "不明なマップ")
-            map_stat = map_buckets.setdefault(map_name, MapStat(name=map_name))
-            map_stat.games += 1
-            map_stat.wins += int(won)
-
-        stats.matches = rows
-        total_shots = headshots + bodyshots + legshots
-        stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
-        stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
-        stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
-        return stats
-
-    def _match_stats_via_local_api(self, account: Account, count: int,
-                                   progress: Progress) -> MatchStats:
+    def _fetch_rows_via_local_api(self, account: Account, count: int,
+                                  progress: Progress) -> list[MatchListRow]:
         """競技試合一覧は毎回取り直す (安い、1 回の通信)。試合ごとの詳細は
         終わった試合の内容が変わることは無いので、一度取れた分はディスクの
         キャッシュに残し、次回はまだ持っていない (＝新しく増えた) 試合の
@@ -1133,12 +1227,7 @@ class AccountService:
         except content.ContentError:
             maps = {}
 
-        stats = MatchStats(matches=[])
         rows: list[MatchListRow] = []
-        agent_buckets: dict[str, AgentStat] = {}
-        map_buckets: dict[str, MapStat] = {}
-        headshots = bodyshots = legshots = 0
-
         for i, m in enumerate(matches):
             summary = self.match_cache.get(result.puuid, m.match_id)
             if summary is None:
@@ -1160,40 +1249,62 @@ class AccountService:
                 team_score=summary.team_score, enemy_score=summary.enemy_score,
                 placement=summary.placement, headshot_pct=summary.headshot_pct,
                 damage_delta=summary.damage_delta,
+                agent_name=agents.get(summary.character_id, {}).get("name", ""),
+                map_name=maps.get(summary.map_id, {}).get("name", ""),
+                headshots=summary.headshots, bodyshots=summary.bodyshots,
+                legshots=summary.legshots,
             ))
-
-            stats.games += 1
-            stats.wins += int(summary.won)
-            headshots += summary.headshots
-            bodyshots += summary.bodyshots
-            legshots += summary.legshots
-
-            agent_name = agents.get(summary.character_id, {}).get("name") or "不明なエージェント"
-            agent = agent_buckets.setdefault(agent_name, AgentStat(name=agent_name))
-            agent.games += 1
-            agent.wins += int(summary.won)
-
-            map_name = maps.get(summary.map_id, {}).get("name") or "不明なマップ"
-            map_stat = map_buckets.setdefault(map_name, MapStat(name=map_name))
-            map_stat.games += 1
-            map_stat.wins += int(summary.won)
-
-        stats.matches = rows
-        total_shots = headshots + bodyshots + legshots
-        stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
-        stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
-        stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
         self.match_cache.save()
-        return stats
+        return rows
 
     # -- 試合詳細 (スコアボード) ---------------------------------------------
     def match_detail(self, account: Account, match_id: str) -> MatchDetail:
-        """1 試合分の全員のスコアボードを組み立てる。モードの選び方は
+        """1 試合分の全員のスコアボードを返す。
+
+        保存済み (history/<id>.json) があればそれを返し、通信しない。終わった
+        試合の内容は変わらないため。無ければ取得して保存する。モードの選び方は
         match_stats() と同じ (API キーがあれば API モード)。
         """
+        saved = self._load_saved_detail(account, match_id)
+        if saved is not None:
+            return saved
         if self.henrik_api_key:
-            return self._match_detail_via_henrik(account, match_id)
-        return self._match_detail_via_local_api(account, match_id)
+            detail = self._match_detail_via_henrik(account, match_id)
+        else:
+            detail = self._match_detail_via_local_api(account, match_id)
+        self._save_detail(account, match_id, detail)
+        return detail
+
+    def _load_saved_detail(self, account: Account, match_id: str) -> MatchDetail | None:
+        raw = (self.history.load(account.id).get("details") or {}).get(match_id)
+        if not isinstance(raw, dict):
+            return None
+        try:
+            names = {f.name for f in fields(MatchPlayerStat)}
+
+            def players(key: str) -> list[MatchPlayerStat]:
+                return [MatchPlayerStat(**{k: v for k, v in p.items() if k in names})
+                        for p in raw.get(key) or []]
+
+            detail_names = {f.name for f in fields(MatchDetail)}
+            base = {k: v for k, v in raw.items()
+                    if k in detail_names and k not in ("my_team", "enemy_team")}
+            return MatchDetail(**base, my_team=players("my_team"),
+                               enemy_team=players("enemy_team"))
+        except (TypeError, AttributeError):
+            return None  # 壊れた保存は無かったことにして取り直す
+
+    def _save_detail(self, account: Account, match_id: str, detail: MatchDetail) -> None:
+        def mutate(data: dict) -> None:
+            details = data.get("details")
+            if not isinstance(details, dict):
+                details = data["details"] = {}
+            details[match_id] = asdict(detail)
+
+        try:
+            self.history.update(account.id, mutate)
+        except OSError:
+            pass  # 保存できなくても表示はできる
 
     def _match_detail_via_henrik(self, account: Account, match_id: str) -> MatchDetail:
         api_key = self.henrik_api_key

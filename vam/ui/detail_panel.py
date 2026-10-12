@@ -285,8 +285,18 @@ class HistoryTab(QWidget):
 
     def set_stats(self, stats) -> None:
         """HS率・エージェント別/マップ別勝率のまとめを表示する。試合が無ければ隠す。"""
-        self.source_label.setText(
-            "（API モード）" if getattr(stats, "source", "local") == "api" else "（サインインモード）"
+        mode = "API モード" if getattr(stats, "source", "local") == "api" else "サインインモード"
+        saved_at = getattr(stats, "saved_at", 0.0)
+        error = getattr(stats, "fetch_error", "")
+        if getattr(stats, "from_saved", False):
+            label = f"（保存済み {time.strftime('%m/%d %H:%M', time.localtime(saved_at))}・更新中…）"
+        elif error:
+            label = f"（保存済み {time.strftime('%m/%d %H:%M', time.localtime(saved_at))}・最新は取得できず）"
+        else:
+            label = f"（{mode}）"
+        self.source_label.setText(label)
+        self.source_label.setToolTip(
+            f"最新の取得に失敗したため、保存してある戦績を表示しています。\n{error}" if error else ""
         )
         if not stats.games:
             self.summary.setVisible(False)

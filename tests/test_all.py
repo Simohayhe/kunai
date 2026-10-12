@@ -877,6 +877,114 @@ def test_match_stats_api_mode() -> None:
         check("キー未設定ならローカルAPI経路", True)
 
 
+def test_history_persistence() -> None:
+    section("戦績のアカウント別保存 (JSON)")
+    from vam.models import Account
+    from vam.riot import henrik
+    from vam.service import AccountService, ServiceError
+    from vam.storage import Vault
+
+    root = Path(tempfile.mkdtemp())
+    vault = Vault(root)
+    vault.initialize()
+    svc = AccountService(vault)
+    svc.henrik_api_key = "dummy-key"
+
+    def match(mid, started, won=True, rr=0):
+        return {
+            "metadata": {"match_id": mid, "map": {"id": "map1", "name": "アセント"},
+                         "started_at": started},
+            "players": [{"puuid": "puuid1", "team_id": "Red", "name": "Self", "tag": "1",
+                         "party_id": "p", "agent": {"id": "a1", "name": "ジェット"},
+                         "stats": {"score": 5000, "kills": 10, "deaths": 5, "assists": 1,
+                                   "headshots": 4, "bodyshots": 4, "legshots": 2,
+                                   "damage": {"dealt": 1500, "received": 1000}}},
+                        {"puuid": "puuid9", "team_id": "Blue", "name": "E", "tag": "2",
+                         "party_id": "q", "agent": {"id": "a2", "name": "ネオン"},
+                         "stats": {"score": 3000}}],
+            "teams": [{"team_id": "Red", "won": won, "rounds": {"won": 13, "lost": 5}},
+                      {"team_id": "Blue", "won": not won, "rounds": {"won": 5, "lost": 13}}],
+        }
+
+    state = {"matches": [match("m1", "2026-01-01T00:00:00.000Z")], "fail": False}
+    hist = [{"match_id": "m1", "tier": {"id": 21}, "rr": 50, "last_change": 12}]
+
+    def fake_find_matches(puuid, region, api_key, count=20):
+        if state["fail"]:
+            raise henrik.HenrikError("ネットワークが無い")
+        return state["matches"]
+
+    orig = (henrik.find_matches, henrik.find_mmr_history)
+    henrik.find_matches = fake_find_matches
+    henrik.find_mmr_history = lambda puuid, region, api_key: hist
+    try:
+        account = Account(label="hist-test", puuid="puuid1", region="ap")
+        check("保存前は無い", svc.saved_match_stats(account) is None)
+
+        stats = svc.match_stats(account)
+        path = svc.history.path_for(account.id)
+        check("取得するとJSONができる", path.is_file())
+        check("アカウントIDごとのファイル", path.name == f"{account.id}.json")
+        saved = svc.saved_match_stats(account)
+        check("通信せず保存済みが読める", saved is not None and saved.games == 1)
+        check("保存済みの印が立つ", saved.from_saved and saved.saved_at > 0)
+        check("集計が保存行から再現される",
+              round(saved.headshot_pct) == 40 and saved.by_agent[0].name == "ジェット"
+              and saved.by_map[0].name == "アセント")
+        check("RRも残る", saved.matches[0].rr_earned == 12 and saved.matches[0].rr_after == 50)
+
+        # 取得に失敗しても保存済みが出る (ログインしていない状況)
+        state["fail"] = True
+        offline = svc.match_stats(account)
+        check("取得失敗でも戦績を返す", offline.games == 1)
+        check("失敗理由が入る", "ネットワークが無い" in offline.fetch_error, offline.fetch_error)
+
+        # 新しい試合は足され、古い分は消えない (20件を超えて貯まる)
+        state["fail"] = False
+        state["matches"] = [match("m2", "2026-01-02T00:00:00.000Z", won=False)]
+        merged = svc.match_stats(account)
+        check("保存分に足される", merged.games == 2 and merged.wins == 1, str(merged.games))
+        check("新しい順", [m.match_id for m in merged.matches] == ["m2", "m1"])
+        check("取得成功なら失敗理由は空", merged.fetch_error == "")
+        check("古い試合のRRが残る", merged.matches[1].rr_earned == 12)
+
+        # スコアボードは一度取れたら保存される
+        d1 = svc.match_detail(account, "m2")
+        svc._henrik_raw_matches.clear()
+        orig_find_match = henrik.find_match
+        henrik.find_match = lambda *a, **k: (_ for _ in ()).throw(AssertionError("通信した"))
+        try:
+            d2 = svc.match_detail(account, "m2")
+        finally:
+            henrik.find_match = orig_find_match
+        check("保存済みスコアボードは通信しない", d2.match_id == "m2" and len(d2.my_team) == 1)
+        check("内容が復元される", d2.my_team[0].is_self and d2.my_team[0].kills == 10
+              and d2.enemy_team[0].agent_name == "ネオン" and d2.my_team_score == 13)
+
+        # 保存が壊れていても落ちない
+        path.write_text("{not json", encoding="utf-8")
+        check("壊れたJSONは空扱い", svc.saved_match_stats(account) is None)
+        stats = svc.match_stats(account)
+        check("壊れていても取り直して復旧", stats.games == 1)
+
+        # アカウントごとに別ファイル
+        other = Account(label="other", puuid="puuid1", region="ap")
+        check("他アカウントには見えない", svc.saved_match_stats(other) is None)
+
+        svc.history.delete(account.id)
+        check("削除でJSONも消える", not path.exists())
+    finally:
+        henrik.find_matches, henrik.find_mmr_history = orig
+
+    # 保存が一つも無く、取得も失敗したときだけ例外
+    svc.henrik_api_key = ""
+    try:
+        svc.match_stats(Account(label="nothing"))
+        check("保存も取得も無ければ例外", False, "例外が出なかった")
+    except ServiceError:
+        check("保存も取得も無ければ例外", True)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -901,6 +1009,28 @@ def test_status_notify() -> None:
     # 同じ前回/今回なら何も検知しない (重複通知の防止の土台)
     events3 = status.diff(prev, prev)
     check("差分が無ければ何も検知しない", events3 == [])
+
+    # メンテナンスは予定/実施中を開始時刻で判定する (Riot の status は
+    # 予定の告知時点から in_progress になるため当てにならない)
+    import datetime as _dt
+    start = _dt.datetime(2026, 10, 14, 6, 0, tzinfo=status.JST).timestamp()
+    maint = {"id": 1, "maintenance_status": "in_progress",
+             "titles": [{"locale": "ja_JP", "content": "メンテナンス：2026/10/14 06:00 JST"}]}
+    check("開始前は予定扱い", status.is_upcoming(maint, start - 3600))
+    check("開始後は実施中扱い", not status.is_upcoming(maint, start + 60))
+    snap_m = status.StatusSnapshot(maintenances={"1": maint})
+    banner = status.summarize(snap_m, now=start - 3600)
+    check("バナーは「予定」", banner.startswith("メンテナンス予定:") and "メンテナンス中" not in banner, banner)
+    check("バナー: 開始後は「中」", status.summarize(snap_m, now=start + 60).startswith("メンテナンス中:"))
+    ev = status.diff(status.StatusSnapshot(), snap_m, now=start - 3600)
+    check("予定の発表を検知", len(ev) == 1 and ev[0].action == "scheduled")
+    before = status.StatusSnapshot(maintenances={"1": maint}, taken_at=start - 3600)
+    ev2 = status.diff(before, snap_m, now=start + 60)
+    check("予定→開始の遷移を検知", len(ev2) == 1 and ev2[0].action == "started")
+    ev3 = status.diff(before, snap_m, now=start - 60)
+    check("開始前は遷移しない", ev3 == [])
+    no_time = {"id": 2, "maintenance_status": "scheduled", "titles": []}
+    check("時刻が読めなければ status に従う", status.is_upcoming(no_time))
 
     # check_status(): critical だけメンション付きで通知する
     vault = Vault(Path(tempfile.mkdtemp()))
@@ -1088,7 +1218,8 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_status_notify, test_ui):
+               test_match_stats_api_mode, test_history_persistence,
+               test_status_notify, test_ui):
         try:
             fn()
         except Exception as exc:

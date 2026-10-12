@@ -764,6 +764,7 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.Yes:
             self.vault.remove(account_id)
+            self.service.history.delete(account_id)
             if self.selected_id == account_id:
                 self.selected_id = None
             self.reload_accounts()
@@ -1035,7 +1036,12 @@ class MainWindow(QMainWindow):
         account = self.vault.get(self.selected_id) if self.selected_id else None
         if not account:
             return
-        self.detail.history.set_message("読み込み中…")
+        # 保存済みの戦績があれば、取得を待たずにまずそれを出す。
+        saved = self.service.saved_match_stats(account)
+        if saved:
+            self._on_history(account.id, saved)
+        else:
+            self.detail.history.set_message("読み込み中…")
         workers.run(
             self.service.match_stats, account,
             on_done=lambda stats: self._on_history(account.id, stats),
@@ -1057,6 +1063,8 @@ class MainWindow(QMainWindow):
     def _on_history_failed(self, account_id: str, message: str) -> None:
         if self.selected_id != account_id:
             return
+        # 保存済みを表示中なら、エラー画面で潰さずそのまま残す (取得失敗は
+        # match_stats が保存分を返す形で通知するので、ここに来るのは保存が無いとき)。
         self.detail.history.set_message(message)
 
     def open_match_detail(self, match_id: str) -> None:
