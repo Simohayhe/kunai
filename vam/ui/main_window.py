@@ -97,7 +97,8 @@ class MainWindow(QMainWindow):
         self.check_for_update()
 
         self._act_timer = QTimer(self)
-        self._act_timer.timeout.connect(self.update_act_countdown)
+        # 通信は起動時の 1 回だけ。タイマーは表示の残り日数を計算し直すだけ
+        self._act_timer.timeout.connect(self._render_act)
         self._act_timer.start(10 * 60 * 1000)
         self.update_act_countdown()
 
@@ -471,10 +472,20 @@ class MainWindow(QMainWindow):
                     on_error=lambda m: diagnostics.log(f"アクト情報の取得に失敗: {m}"))
 
     def _on_act_status(self, status) -> None:
+        self._act = status
+        self._render_act()
+
+    def _render_act(self) -> None:
+        """取得済みの終了時刻から残りを計算して表示する (通信しない)。"""
+        status = getattr(self, "_act", None)
         if not status:
             self.act_label.hide()
             return
-        left = status["seconds_left"]
+        left = status["end"] - time.time()
+        if left <= 0:
+            # 起動したまま次のアクトに入った。情報を取り直す (普通はキャッシュ読みで済む)
+            self.update_act_countdown()
+            return
         if left >= 86400:
             remain = f"あと {int(left // 86400)} 日"
         elif left >= 3600:
