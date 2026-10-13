@@ -45,25 +45,6 @@ def launch(product: tuple[str, str] | None = PRODUCT_VALORANT,
     )
 
 
-def launch_custom(path: str) -> None:
-    """利用者が指定したショートカット / 実行ファイルで VALORANT を起動する。
-
-    Riot Client の代わりに使う。Kunai はそれが何をするかには関与しない
-    (どんなツールを通すかは利用者の自己責任)。
-    """
-    target = Path(path.strip().strip('"'))
-    if not target.exists():
-        raise LaunchError(f"指定された起動コマンドが見つかりません: {target}")
-    suffix = target.suffix.lower()
-    if suffix == ".exe":
-        subprocess.Popen([str(target)], cwd=str(target.parent),
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-    elif suffix in (".bat", ".cmd"):
-        subprocess.Popen([str(target)], shell=True, cwd=str(target.parent))
-    else:
-        os.startfile(str(target))   # ショートカット (.lnk) など。関連付けで開く
-
-
 def wait_for_client(timeout: float = 60.0) -> bool:
     """Riot Client のローカル API が応答し始めるまで待つ。"""
     deadline = time.time() + timeout

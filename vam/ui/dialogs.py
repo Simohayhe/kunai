@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
-from PySide6.QtWidgets import QFileDialog
 
 from ..crypto import VaultLocked
 from ..models import Account
@@ -312,18 +311,55 @@ class AccountDialog(QDialog):
         return a
 
 
-LAUNCH_DISCLAIMER = (
-    "公式にサポートされていない方法です。ゲームのファイルを書き換えるツール (言語変更ツールなど) を使うと、"
-    "Vanguard に検知されてアカウントが停止 (BAN) される可能性があります。"
-    "使うかどうかは自己責任で決めてください。結果について Kunai は責任を負いません。"
-)
-
-
 LANGUAGE_DISCLAIMER = (
     "公式にサポートされていない方法です。ゲームの言語ファイルを書き換えるため、"
     "Vanguard に検知されてアカウントが停止 (BAN) される可能性があります。"
     "使うかどうかは自己責任で決めてください。結果について Kunai は責任を負いません。"
 )
+
+
+class CollapsibleSection(QFrame):
+    """見出しをクリックして開閉できる項目 (プルダウン)。中身は body に入れる。"""
+
+    def __init__(self, title: str, expanded: bool = False, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self.setObjectName("CollapsibleSection")
+        self.setStyleSheet(
+            f"QFrame#CollapsibleSection {{ border:1px solid {theme.BORDER}; border-radius:6px; }}"
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.header = QPushButton()
+        self.header.setCursor(Qt.PointingHandCursor)
+        self.header.setCheckable(True)
+        self.header.setStyleSheet(
+            f"QPushButton {{ text-align:left; padding:9px 12px; border:none; border-radius:6px;"
+            f" background:{theme.BG_CARD}; font-weight:700; font-size:13px; }}"
+            f"QPushButton:hover {{ background:{theme.BG_HOVER}; }}"
+        )
+        self.header.toggled.connect(self.set_expanded)
+        outer.addWidget(self.header)
+
+        self.content = QWidget()
+        self.body = QVBoxLayout(self.content)
+        self.body.setContentsMargins(12, 10, 12, 12)
+        self.body.setSpacing(10)
+        outer.addWidget(self.content)
+
+        self.header.setChecked(expanded)
+        self.set_expanded(expanded)
+
+    def is_expanded(self) -> bool:
+        return not self.content.isHidden()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.content.setVisible(expanded)
+        self.header.setText(("▾  " if expanded else "▸  ") + self._title)
+        if self.header.isChecked() != expanded:
+            self.header.setChecked(expanded)
 
 
 class SettingsDialog(QDialog):
@@ -336,17 +372,19 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                vault: Vault, custom_launch_path: str = "", lang_voice: str = "",
-                lang_text: str = "", locales: list | None = None, parent=None):
+                vault: Vault, lang_voice: str = "", lang_text: str = "",
+                locales: list | None = None, parent=None):
         super().__init__(parent)
         self.vault = vault
         self.setWindowTitle("設定")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
+        self.resize(520, 560)
         self.setStyleSheet(theme.STYLESHEET)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(22, 20, 22, 20)
+        # 縦に長くなるので、項目ごとにプルダウン (開閉) にして、全体はスクロールできるようにする
+        outer = QVBoxLayout(self)
+        outer.setSpacing(12)
+        outer.setContentsMargins(22, 20, 22, 16)
 
         title_row = QHBoxLayout()
         title = QLabel("設定")
@@ -357,13 +395,29 @@ class SettingsDialog(QDialog):
         self.guide_button.setToolTip("このソフトの取扱説明書を開きます")
         self.guide_button.clicked.connect(self._open_guide)
         title_row.addWidget(self.guide_button)
-        layout.addLayout(title_row)
+        outer.addLayout(title_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        container = QWidget()
+        sections = QVBoxLayout(container)
+        sections.setSpacing(8)
+        sections.setContentsMargins(0, 0, 8, 0)
+        scroll.setWidget(container)
+        outer.addWidget(scroll, 1)
+        self.scroll = scroll
+        self.sections: dict[str, CollapsibleSection] = {}
+
+        def section(key: str, title_text: str) -> QVBoxLayout:
+            box = CollapsibleSection(title_text)
+            self.sections[key] = box
+            sections.addWidget(box)
+            return box.body
 
         # -- 通知 -----------------------------------------------------
-        notify_title = QLabel("メンテナンス・障害通知")
-        notify_title.setObjectName("SectionTitle")
-        layout.addWidget(notify_title)
-
+        layout = section("notify", "メンテナンス・障害通知")
         notify_desc = QLabel(
             "VALORANT のメンテナンス・障害情報を定期的に確認し、開始/終了"
             "したときに Discord へ通知します。空欄にすると、アプリ内の"
@@ -384,10 +438,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(notify_form)
 
         # -- ログイン ---------------------------------------------------
-        login_title = QLabel("自動ログイン")
-        login_title.setObjectName("SectionTitle")
-        layout.addWidget(login_title)
-
+        layout = section("login", "自動ログイン")
         login_desc = QLabel(
             "ログイン画面が表示されてから入力を始めるまでの待機秒数です。"
             "短くすると速くなりますが、短すぎると画面の描画が間に合わず"
@@ -417,43 +468,8 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
-        # -- 起動コマンド (上級者向け) ---------------------------------------
-        launch_title = QLabel("起動コマンド (上級者向け)")
-        launch_title.setObjectName("SectionTitle")
-        layout.addWidget(launch_title)
-
-        launch_desc = QLabel(
-            "アカウントを切り替えて VALORANT を起動するとき、Riot Client の代わりに"
-            "ここで指定したショートカット (.lnk) や実行ファイル (.exe / .bat) を使います。"
-            "音声とテキストで別の言語にする外部ツールのショートカットなどを通したいときに使えます。"
-            "空欄なら通常どおり起動します。"
-        )
-        launch_desc.setObjectName("SubTitle")
-        launch_desc.setWordWrap(True)
-        layout.addWidget(launch_desc)
-
-        launch_warn = QLabel("⚠ " + LAUNCH_DISCLAIMER)
-        launch_warn.setWordWrap(True)
-        launch_warn.setStyleSheet(
-            f"color:{theme.WARN}; font-size:12px; border:1px solid {theme.WARN};"
-            " border-radius:4px; padding:7px 9px;"
-        )
-        layout.addWidget(launch_warn)
-
-        launch_row = QHBoxLayout()
-        self.custom_launch = QLineEdit(custom_launch_path)
-        self.custom_launch.setPlaceholderText(r"例: C:\Users\...\Desktop\VALORANT Custom Language.lnk")
-        launch_row.addWidget(self.custom_launch, 1)
-        browse = QPushButton("参照…")
-        browse.clicked.connect(self._browse_launch)
-        launch_row.addWidget(browse)
-        layout.addLayout(launch_row)
-
         # -- 音声とテキストの言語 (上級者向け) -----------------------------------
-        lang_title = QLabel("音声とテキストの言語 (上級者向け)")
-        lang_title.setObjectName("SectionTitle")
-        layout.addWidget(lang_title)
-
+        layout = section("language", "音声とテキストの言語 (上級者向け)")
         lang_desc = QLabel(
             "音声は英語のまま、文字だけ日本語にする、といった組み合わせにします。"
             "VALORANT を Kunai から起動するとき、ゲームが立ち上がった直後に、"
@@ -505,10 +521,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.lang_status)
 
         # -- プレイヤー検索 ---------------------------------------------
-        search_title = QLabel("プレイヤー検索 / 戦績のAPIモード")
-        search_title.setObjectName("SectionTitle")
-        layout.addWidget(search_title)
-
+        layout = section("search", "プレイヤー検索 / 戦績のAPIモード")
         search_desc = QLabel(
             "他プレイヤーを Riot ID で検索するには、外部の HenrikDev API の"
             "キーが要ります。設定すると、戦績タブもサインイン不要の"
@@ -530,10 +543,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(search_form)
 
         # -- マスターパスワード -----------------------------------------
-        pw_title = QLabel("マスターパスワード")
-        pw_title.setObjectName("SectionTitle")
-        layout.addWidget(pw_title)
-
+        layout = section("password", "マスターパスワード")
         pw_row = QHBoxLayout()
         pw_row.setSpacing(9)
         self.password_state_label = QLabel(
@@ -547,10 +557,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(pw_row)
 
         # -- 更新 ---------------------------------------------------
-        update_title = QLabel("ソフトの更新")
-        update_title.setObjectName("SectionTitle")
-        layout.addWidget(update_title)
-
+        layout = section("update", "ソフトの更新")
         update_row = QHBoxLayout()
         update_row.setSpacing(9)
         self.version_label = QLabel(f"現在のバージョン: v{current_version}")
@@ -570,13 +577,15 @@ class SettingsDialog(QDialog):
         self.update_button.setVisible(False)
         layout.addWidget(self.update_button)
 
+        sections.addStretch(1)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
         buttons.button(QDialogButtonBox.Ok).setText("保存")
         buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer.addWidget(buttons)
 
     def language_voice(self) -> str:
         return self.lang_voice.currentData() or ""
@@ -586,22 +595,12 @@ class SettingsDialog(QDialog):
 
     def set_lang_status(self, text: str, busy: bool = False) -> None:
         try:
+            self.sections["language"].set_expanded(True)
             self.lang_status.setText(text)
             self.lang_prepare_button.setEnabled(not busy)
             self.lang_restore_button.setEnabled(not busy)
         except RuntimeError:
             pass  # 設定画面が先に閉じられた
-
-    def _browse_launch(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "起動に使うショートカット / 実行ファイルを選ぶ", "",
-            "ショートカット・実行ファイル (*.lnk *.exe *.bat *.cmd);;すべてのファイル (*)",
-        )
-        if path:
-            self.custom_launch.setText(path)
-
-    def custom_launch_text(self) -> str:
-        return self.custom_launch.text().strip().strip('"')
 
     def _open_guide(self) -> None:
         from .guide import GuideDialog
@@ -651,23 +650,27 @@ class SettingsDialog(QDialog):
 
     # -- 更新確認の表示 (MainWindow から呼ばれる) ----------------------------
     def set_checking(self) -> None:
+        self.sections["update"].set_expanded(True)
         self.check_button.setEnabled(False)
         self.check_button.setText("確認中…")
         self.update_status.setText("")
 
     def set_up_to_date(self) -> None:
+        self.sections["update"].set_expanded(True)
         self.check_button.setEnabled(True)
         self.check_button.setText("今すぐ確認")
         self.update_status.setText("最新の状態です。")
         self.update_button.setVisible(False)
 
     def set_check_failed(self, message: str) -> None:
+        self.sections["update"].set_expanded(True)
         self.check_button.setEnabled(True)
         self.check_button.setText("今すぐ確認")
         self.update_status.setText(message)
         self.update_button.setVisible(False)
 
     def set_update_available(self, tag: str) -> None:
+        self.sections["update"].set_expanded(True)   # 新しい版があるときは、開いて目立たせる
         self.check_button.setEnabled(True)
         self.check_button.setText("今すぐ確認")
         self.update_status.setText(f"{tag} が利用できます。")

@@ -25,8 +25,7 @@ from . import theme, workers
 from .account_card import AccountCard, AccountListContainer
 from .detail_panel import DetailPanel
 from .dialogs import (
-    LANGUAGE_DISCLAIMER, LAUNCH_DISCLAIMER, AccountDialog, MatchDetailDialog,
-    PlayerSearchDialog, SettingsDialog,
+    LANGUAGE_DISCLAIMER, AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
 )
 from .icons import IconLoader
 from .refresh_progress import RefreshProgressBar
@@ -34,6 +33,15 @@ from .refresh_progress import RefreshProgressBar
 STATUS_CHECK_INTERVAL_MS = 120_000
 ACCOUNT_AUTO_REFRESH_INTERVAL_MS = 180_000
 
+
+
+def seconds_until_next_tick(left: float) -> float:
+    """表示が変わる次のタイミングまでの秒数。残りが ちょうど N 時間 / N 日を切る
+    瞬間 (＝終了時刻の「分」が 00 なら xx:00) に合わせる。1 時間を切ってからは
+    終了の瞬間まで。1 秒だけ余裕を持たせて、境目の手前で読まないようにする。"""
+    if left <= 3600:
+        return max(left, 0.0) + 1.0
+    return (left % 3600) + 1.0
 
 
 def format_remaining(seconds: float) -> str:
@@ -111,10 +119,11 @@ class MainWindow(QMainWindow):
 
         self.check_for_update()
 
+        # 通信は起動時の 1 回だけ。表示は、残り時間の表記が変わるタイミング
+        # (1 時間ごと、xx:00) にだけ計算し直す
         self._act_timer = QTimer(self)
-        # 通信は起動時の 1 回だけ。タイマーは表示の残り日数を計算し直すだけ
+        self._act_timer.setSingleShot(True)
         self._act_timer.timeout.connect(self._render_act)
-        self._act_timer.start(10 * 60 * 1000)
         self.update_act_countdown()
 
         self._account_refresh_timer = QTimer(self)
@@ -502,6 +511,8 @@ class MainWindow(QMainWindow):
             # 起動したまま次のアクトに入った。情報を取り直す (普通はキャッシュ読みで済む)
             self.update_act_countdown()
             return
+        # 次に表記が変わるタイミングで、もう一度ここへ来る
+        self._act_timer.start(int(seconds_until_next_tick(left) * 1000))
         remain = "残り " + format_remaining(left)
         end = time.strftime("%m/%d %H:%M", time.localtime(status["end"]))
         self.act_label.setText(f"{status['name']}　{remain}")
@@ -708,7 +719,6 @@ class MainWindow(QMainWindow):
             henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
             vault=self.vault,
-            custom_launch_path=self.service.custom_launch_path,
             lang_voice=self.service.lang_voice,
             lang_text=self.service.lang_text,
             locales=langpack.available_locales(),
@@ -726,7 +736,6 @@ class MainWindow(QMainWindow):
             self.service.login_step_delay = dialog.step_delay()
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.service.henrik_api_key = dialog.henrik_api_key()
-            self._save_custom_launch(dialog.custom_launch_text())
             self._save_languages(dialog.language_voice(), dialog.language_text())
             self.status.showMessage("設定を保存しました", 4000)
 
@@ -774,21 +783,6 @@ class MainWindow(QMainWindow):
             dialog.set_lang_status("音声の言語本来のテキストに戻しました")
         except Exception as exc:
             dialog.set_lang_status(f"戻せませんでした: {exc}")
-
-    def _save_custom_launch(self, path: str) -> None:
-        """起動コマンドを保存する。新しく指定するときは、リスクを確認してから。"""
-        if path == self.service.custom_launch_path:
-            return
-        if path:
-            answer = QMessageBox.warning(
-                self, "起動コマンドの確認",
-                LAUNCH_DISCLAIMER + "\n\n自己責任で使います。よろしいですか？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                self.status.showMessage("起動コマンドは変更しませんでした", 4000)
-                return
-        self.service.custom_launch_path = path
 
     def open_player_search(self) -> None:
         dialog = PlayerSearchDialog(parent=self)

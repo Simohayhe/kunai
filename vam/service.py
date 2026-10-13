@@ -317,7 +317,6 @@ DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 SETTING_SORT_MODE = "sort_mode"
-SETTING_CUSTOM_LAUNCH = "custom_launch_path"
 SETTING_LANG_VOICE = "lang_voice"
 SETTING_LANG_TEXT = "lang_text"
 # アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
@@ -508,18 +507,6 @@ class AccountService:
         except (langpack.LangPackError, OSError) as exc:
             warnings.append(f"言語の差し替えはスキップしました (通常の言語で起動します): {exc}")
             return None
-
-    @property
-    def custom_launch_path(self) -> str:
-        """VALORANT の起動に Riot Client の代わりに使うショートカット / 実行ファイル。
-        空なら通常どおり。上級者向けで、使うものは利用者の自己責任。"""
-        return str(self.vault.settings().get(SETTING_CUSTOM_LAUNCH, ""))
-
-    @custom_launch_path.setter
-    def custom_launch_path(self, value: str) -> None:
-        settings = self.vault.settings()
-        settings[SETTING_CUSTOM_LAUNCH] = value.strip().strip('"')
-        self.vault.save_settings(settings)
 
     @property
     def sort_mode(self) -> str:
@@ -935,16 +922,7 @@ class AccountService:
             language_swap = (self._prepare_language_swap(progress, warnings)
                              if launch_game else None)
             progress("Riot Client を起動中…")
-            custom = self.custom_launch_path if (launch_game and not process.mock_mode()) else ""
-            if custom:
-                try:
-                    progress("指定された起動コマンドで起動します…")
-                    launcher.launch_custom(custom)
-                except (launcher.LaunchError, OSError) as exc:
-                    warnings.append(f"指定した起動コマンドを使えなかったので、通常の方法で起動しました: {exc}")
-                    launcher.launch(launcher.PRODUCT_VALORANT)
-            else:
-                launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
+            launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
             if language_swap:
                 # ゲームのプロセスが立ち上がった直後に、テキストの言語ファイルを差し替える
                 paks, voice, text = language_swap

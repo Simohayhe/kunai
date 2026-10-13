@@ -1316,6 +1316,14 @@ def test_act_status() -> None:
     check("数時間", format_remaining(5 * 3600 + 10) == "5h")
     check("1 時間を切ったら <1h", format_remaining(3599) == "<1h" and format_remaining(0) == "<1h")
 
+    from vam.ui.main_window import seconds_until_next_tick as nxt
+    # 終了が 09:00 で、いま 06:20 (残り 2h40m) なら、次は 07:00 (40 分後) に表記が変わる
+    check("次は残りが 2h になる 40 分後 (xx:00)", abs(nxt(2 * 3600 + 40 * 60) - (40 * 60 + 1)) < 1e-6)
+    check("残り 3h01m なら、60 秒後に 3h を切る (+1 秒の余裕)", nxt(3 * 3600 + 60) == 61.0)
+    check("1 時間を切ったら終了の瞬間まで", nxt(1800) == 1801.0)
+    check("終了後も負にならない", nxt(-5) == 1.0)
+    check("1 日以上でも次の境目は 1 時間以内", nxt(5 * 86400 + 1234) <= 3601.0)
+
 
 def test_browser_open() -> None:
     section("Riot アカウントページを開く")
@@ -1519,80 +1527,6 @@ def test_match_extras() -> None:
     check("取得済みならその場で入る", label2.pixmap() is not None and not label2.pixmap().isNull())
     loader.attach(QLabel(), None, 20)
     check("URL 無しは何もしない", True)
-
-
-def test_custom_launch() -> None:
-    section("起動コマンド (自己責任の上級者向け設定)")
-    from vam.riot import launcher
-    from vam.service import AccountService
-    from vam.storage import Vault
-
-    vault = Vault(Path(tempfile.mkdtemp()))
-    vault.initialize()
-    svc = AccountService(vault)
-    check("既定は空", svc.custom_launch_path == "")
-    svc.custom_launch_path = '  "C:/x/a.lnk"  '
-    check("前後の空白と引用符を外して保存", svc.custom_launch_path == "C:/x/a.lnk", svc.custom_launch_path)
-    check("再読込しても残る", AccountService(vault).custom_launch_path == "C:/x/a.lnk")
-
-    d = Path(tempfile.mkdtemp())
-    exe, bat, lnk = d / "a.exe", d / "b.bat", d / "c.lnk"
-    for f in (exe, bat, lnk):
-        f.write_text("", encoding="utf-8")
-    popen, started = [], []
-    saved = (launcher.subprocess.Popen, getattr(launcher.os, "startfile", None))
-    launcher.subprocess.Popen = lambda args, **k: popen.append((args, k))
-    launcher.os.startfile = lambda path: started.append(path)
-    try:
-        launcher.launch_custom(str(exe))
-        check(".exe は直接起動", popen and popen[-1][0] == [str(exe)])
-        launcher.launch_custom(f'"{bat}"')
-        check(".bat は shell 経由 (引用符付きでも可)", popen[-1][1].get("shell") is True)
-        launcher.launch_custom(str(lnk))
-        check(".lnk は関連付けで開く", started == [str(lnk)], str(started))
-        try:
-            launcher.launch_custom(str(d / "none.lnk"))
-            check("無いパスはエラー", False, "例外が出なかった")
-        except launcher.LaunchError:
-            check("無いパスはエラー", True)
-    finally:
-        launcher.subprocess.Popen = saved[0]
-        if saved[1] is not None:
-            launcher.os.startfile = saved[1]
-
-    # 設定画面と、保存時の確認
-    from PySide6.QtWidgets import QApplication, QMessageBox
-    from vam.ui import main_window as mw
-    from vam.ui.dialogs import LAUNCH_DISCLAIMER, SettingsDialog
-    QApplication.instance() or QApplication([])
-    dlg = SettingsDialog(webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
-                         henrik_api_key="", current_version="0", vault=vault,
-                         custom_launch_path="C:/x/a.lnk")
-    check("設定画面に現在の値が入る", dlg.custom_launch_text() == "C:/x/a.lnk")
-    check("警告文に自己責任・BANが書かれている",
-          "自己責任" in LAUNCH_DISCLAIMER and "BAN" in LAUNCH_DISCLAIMER)
-
-    class Fake:
-        status = type("S", (), {"showMessage": lambda self, *a, **k: None})()
-        service = svc
-    asked = []
-    saved_warn = QMessageBox.warning
-    QMessageBox.warning = staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
-    try:
-        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
-        check("新しく指定するときは確認が出る", len(asked) == 1 and "自己責任" in asked[0])
-        check("断れば保存されない", svc.custom_launch_path == "C:/x/a.lnk")
-        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Yes)
-        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
-        check("了承すれば保存される", svc.custom_launch_path == "C:/new/b.lnk")
-        asked.clear()
-        QMessageBox.warning = staticmethod(lambda *a, **k: asked.append(1) or QMessageBox.Yes)
-        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
-        check("変えていなければ確認しない", asked == [])
-        mw.MainWindow._save_custom_launch(Fake, "")
-        check("空にするのは確認なしで解除できる", svc.custom_launch_path == "" and asked == [])
-    finally:
-        QMessageBox.warning = saved_warn
 
 
 def _fb_write_table(buf: bytearray, spec: dict) -> int:
@@ -2087,6 +2021,20 @@ def test_ui() -> None:
         check("状態表示もパスワード無し",
               "パスワードなし" in settings1.password_state_label.text())
 
+        # 設定画面: 項目ごとのプルダウン + スクロール
+        check("項目は既定で閉じている",
+              all(not box.is_expanded() for box in settings1.sections.values()), str(settings1.sections.keys()))
+        check("項目は 6 つ (通知・ログイン・言語・検索・パスワード・更新)", len(settings1.sections) == 6)
+        box = settings1.sections["login"]
+        box.header.click()
+        check("見出しを押すと開く", box.is_expanded() and "▾" in box.header.text())
+        box.header.click()
+        check("もう一度押すと閉じる", not box.is_expanded() and "▸" in box.header.text())
+        check("全体はスクロールできる", settings1.scroll.widgetResizable() and settings1.scroll.widget() is not None)
+        settings1.set_update_available("v9.9.9")
+        check("新しい版があれば更新の項目が開く", settings1.sections["update"].is_expanded())
+        check("閉じていても値は取れる", settings1.step_delay() == 0.5 and settings1.webhook_url() == "")
+
         # 使い方ノート
         from vam.ui.guide import SECTIONS, GuideDialog, build_html
         check("設定に使い方ノートのボタンがある", settings1.guide_button.text() == "使い方ノート")
@@ -2130,7 +2078,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_custom_launch, test_langpack,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_langpack,
                test_status_notify, test_ui):
         try:
             fn()
