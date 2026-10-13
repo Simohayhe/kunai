@@ -43,7 +43,13 @@ def safe_is_file(path: Path) -> bool:
     """
     try:
         return path.is_file()
-    except OSError:
+    except OSError as exc:
+        # 黙って「無い」扱いにすると、原因が見えなくなる (ログアウトできない等) のでログに残す
+        try:
+            from . import diagnostics
+            diagnostics.log(f"ファイルの有無を判定できませんでした: {path}: {exc}")
+        except Exception:
+            pass
         return False
 
 

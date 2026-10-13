@@ -849,6 +849,14 @@ class AccountService:
         else:
             progress("ログアウト状態にしています…")
             session.clear_current()
+            if paths.session_files():
+                # 消せていないと、Riot Client は前のアカウントのまま自動ログインして、
+                # ログイン画面が出ない (＝自動入力する相手がいない) まま待たされる。
+                raise ServiceError(
+                    "Riot Client のログイン情報を消せなかったため、自動入力に進めません。"
+                    "Riot Client のデータフォルダ (Data など) がリンクになっている場合は、"
+                    "右上の「?」の診断情報を確認してください。"
+                )
 
         launched = False
         if launch_game or method == "autologin" or client_only:

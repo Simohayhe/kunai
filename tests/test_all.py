@@ -1605,6 +1605,66 @@ def test_riot_data_links() -> None:
         subprocess.run(["cmd", "/c", "rmdir", str(riot / "Data")], capture_output=True)
 
 
+def test_switch_with_linked_data() -> None:
+    section("Data がリンクのときの切り替え・ログアウト (自動ログインの前提)")
+    import os
+    import subprocess
+    from vam import paths
+    from vam.mock.fake_riot import FakeRiotEnv
+    from vam.models import Account
+    from vam.service import AccountService, ServiceError
+    from vam.storage import Vault
+
+    env = FakeRiotEnv()
+    puuid_a = env.build(puuid="aaaa0000-0000-0000-0000-00000000000a")
+    data = env.client_dir / "Data"
+    real = env.root / "elsewhere" / "Data"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    data.rename(real)                       # 実体を別の場所へ移し、Data をリンクにする
+    result = subprocess.run(["cmd", "/c", "mklink", "/J", str(data), str(real)],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        data.parent.joinpath("Data").mkdir(exist_ok=True)
+        check("ジャンクションを作れない環境ではスキップ", True)
+        return
+    with env:
+        vault = Vault(Path(tempfile.mkdtemp()))
+        vault.initialize()
+        svc = AccountService(vault)
+        env.start_local_api(puuid_a, "MainAcc", "JP1")
+        a = svc.import_current()
+        env.stop_local_api()
+        check("リンク越しでも取り込める", a.session_saved and a.puuid == puuid_a)
+
+        puuid_b = env.write_session("bbbb0000-0000-0000-0000-00000000000b")
+        env.start_local_api(puuid_b, "SubAcc", "JP1")
+        b = svc.import_current()
+        env.stop_local_api()
+        svc.switch(a, launch_game=False)
+        check("リンク越しでも切り替えられる", svc.current_account().id == a.id)
+        check("書き戻しは実体に入っている",
+              (real / "RiotGamesPrivateSettings.yaml").is_file()
+              and (real / "RiotGamesPrivateSettings.yaml").stat().st_size > 0)
+
+        svc.logout_current()
+        check("リンク越しでもログアウトできる (ログイン情報が消える)", not paths.session_files())
+
+        # セッションの無いアカウントは自動ログインへ回る。ログアウトできていなければ止める
+        c = vault.add(Account(label="pw-only", username="user", password="pass"))
+        from vam.riot import session as _session
+        saved_clear = _session.clear_current
+        env.write_session("cccc0000-0000-0000-0000-00000000000c")
+        _session.clear_current = lambda: []     # 消せなかった状況
+        try:
+            svc.switch(c, launch_game=False)
+            check("ログアウトできなければ自動入力に進まず知らせる", False, "例外が出なかった")
+        except ServiceError as exc:
+            check("ログアウトできなければ自動入力に進まず知らせる", "消せなかった" in str(exc), str(exc))
+        finally:
+            _session.clear_current = saved_clear
+    subprocess.run(["cmd", "/c", "rmdir", str(data)], capture_output=True)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1884,7 +1944,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()
