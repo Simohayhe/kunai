@@ -23,7 +23,9 @@ from ..version import __version__
 from . import theme, workers
 from .account_card import AccountCard, AccountListContainer
 from .detail_panel import DetailPanel
-from .dialogs import AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog
+from .dialogs import (
+    LAUNCH_DISCLAIMER, AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
+)
 from .icons import IconLoader
 from .refresh_progress import RefreshProgressBar
 
@@ -704,6 +706,7 @@ class MainWindow(QMainWindow):
             henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
             vault=self.vault,
+            custom_launch_path=self.service.custom_launch_path,
             parent=self,
         )
         dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
@@ -716,7 +719,23 @@ class MainWindow(QMainWindow):
             self.service.login_step_delay = dialog.step_delay()
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.service.henrik_api_key = dialog.henrik_api_key()
+            self._save_custom_launch(dialog.custom_launch_text())
             self.status.showMessage("設定を保存しました", 4000)
+
+    def _save_custom_launch(self, path: str) -> None:
+        """起動コマンドを保存する。新しく指定するときは、リスクを確認してから。"""
+        if path == self.service.custom_launch_path:
+            return
+        if path:
+            answer = QMessageBox.warning(
+                self, "起動コマンドの確認",
+                LAUNCH_DISCLAIMER + "\n\n自己責任で使います。よろしいですか？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.status.showMessage("起動コマンドは変更しませんでした", 4000)
+                return
+        self.service.custom_launch_path = path
 
     def open_player_search(self) -> None:
         dialog = PlayerSearchDialog(parent=self)

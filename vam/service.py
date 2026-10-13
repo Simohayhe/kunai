@@ -315,6 +315,7 @@ DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 SETTING_SORT_MODE = "sort_mode"
+SETTING_CUSTOM_LAUNCH = "custom_launch_path"
 # アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
 SORT_MODES = ("recent", "manual", "rank")
 
@@ -438,6 +439,18 @@ class AccountService:
     def discord_mention(self, value: str) -> None:
         settings = self.vault.settings()
         settings[SETTING_DISCORD_MENTION] = value.strip()
+        self.vault.save_settings(settings)
+
+    @property
+    def custom_launch_path(self) -> str:
+        """VALORANT の起動に Riot Client の代わりに使うショートカット / 実行ファイル。
+        空なら通常どおり。上級者向けで、使うものは利用者の自己責任。"""
+        return str(self.vault.settings().get(SETTING_CUSTOM_LAUNCH, ""))
+
+    @custom_launch_path.setter
+    def custom_launch_path(self, value: str) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_CUSTOM_LAUNCH] = value.strip().strip('"')
         self.vault.save_settings(settings)
 
     @property
@@ -852,7 +865,16 @@ class AccountService:
         if launch_game or method == "autologin" or client_only:
             # client_only: ゲームは起動せず、Riot Client にログインさせるだけ
             progress("Riot Client を起動中…")
-            launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
+            custom = self.custom_launch_path if (launch_game and not process.mock_mode()) else ""
+            if custom:
+                try:
+                    progress("指定された起動コマンドで起動します…")
+                    launcher.launch_custom(custom)
+                except (launcher.LaunchError, OSError) as exc:
+                    warnings.append(f"指定した起動コマンドを使えなかったので、通常の方法で起動しました: {exc}")
+                    launcher.launch(launcher.PRODUCT_VALORANT)
+            else:
+                launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
             launched = True
 
         if method == "session" and launched and recapture:

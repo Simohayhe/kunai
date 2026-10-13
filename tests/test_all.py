@@ -1521,6 +1521,80 @@ def test_match_extras() -> None:
     check("URL 無しは何もしない", True)
 
 
+def test_custom_launch() -> None:
+    section("起動コマンド (自己責任の上級者向け設定)")
+    from vam.riot import launcher
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    check("既定は空", svc.custom_launch_path == "")
+    svc.custom_launch_path = '  "C:/x/a.lnk"  '
+    check("前後の空白と引用符を外して保存", svc.custom_launch_path == "C:/x/a.lnk", svc.custom_launch_path)
+    check("再読込しても残る", AccountService(vault).custom_launch_path == "C:/x/a.lnk")
+
+    d = Path(tempfile.mkdtemp())
+    exe, bat, lnk = d / "a.exe", d / "b.bat", d / "c.lnk"
+    for f in (exe, bat, lnk):
+        f.write_text("", encoding="utf-8")
+    popen, started = [], []
+    saved = (launcher.subprocess.Popen, getattr(launcher.os, "startfile", None))
+    launcher.subprocess.Popen = lambda args, **k: popen.append((args, k))
+    launcher.os.startfile = lambda path: started.append(path)
+    try:
+        launcher.launch_custom(str(exe))
+        check(".exe は直接起動", popen and popen[-1][0] == [str(exe)])
+        launcher.launch_custom(f'"{bat}"')
+        check(".bat は shell 経由 (引用符付きでも可)", popen[-1][1].get("shell") is True)
+        launcher.launch_custom(str(lnk))
+        check(".lnk は関連付けで開く", started == [str(lnk)], str(started))
+        try:
+            launcher.launch_custom(str(d / "none.lnk"))
+            check("無いパスはエラー", False, "例外が出なかった")
+        except launcher.LaunchError:
+            check("無いパスはエラー", True)
+    finally:
+        launcher.subprocess.Popen = saved[0]
+        if saved[1] is not None:
+            launcher.os.startfile = saved[1]
+
+    # 設定画面と、保存時の確認
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from vam.ui import main_window as mw
+    from vam.ui.dialogs import LAUNCH_DISCLAIMER, SettingsDialog
+    QApplication.instance() or QApplication([])
+    dlg = SettingsDialog(webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+                         henrik_api_key="", current_version="0", vault=vault,
+                         custom_launch_path="C:/x/a.lnk")
+    check("設定画面に現在の値が入る", dlg.custom_launch_text() == "C:/x/a.lnk")
+    check("警告文に自己責任・BANが書かれている",
+          "自己責任" in LAUNCH_DISCLAIMER and "BAN" in LAUNCH_DISCLAIMER)
+
+    class Fake:
+        status = type("S", (), {"showMessage": lambda self, *a, **k: None})()
+        service = svc
+    asked = []
+    saved_warn = QMessageBox.warning
+    QMessageBox.warning = staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    try:
+        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
+        check("新しく指定するときは確認が出る", len(asked) == 1 and "自己責任" in asked[0])
+        check("断れば保存されない", svc.custom_launch_path == "C:/x/a.lnk")
+        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Yes)
+        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
+        check("了承すれば保存される", svc.custom_launch_path == "C:/new/b.lnk")
+        asked.clear()
+        QMessageBox.warning = staticmethod(lambda *a, **k: asked.append(1) or QMessageBox.Yes)
+        mw.MainWindow._save_custom_launch(Fake, "C:/new/b.lnk")
+        check("変えていなければ確認しない", asked == [])
+        mw.MainWindow._save_custom_launch(Fake, "")
+        check("空にするのは確認なしで解除できる", svc.custom_launch_path == "" and asked == [])
+    finally:
+        QMessageBox.warning = saved_warn
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1786,7 +1860,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_custom_launch,
                test_status_notify, test_ui):
         try:
             fn()

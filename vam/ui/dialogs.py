@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
+from PySide6.QtWidgets import QFileDialog
 
 from ..crypto import VaultLocked
 from ..models import Account
@@ -311,6 +312,13 @@ class AccountDialog(QDialog):
         return a
 
 
+LAUNCH_DISCLAIMER = (
+    "公式にサポートされていない方法です。ゲームのファイルを書き換えるツール (言語変更ツールなど) を使うと、"
+    "Vanguard に検知されてアカウントが停止 (BAN) される可能性があります。"
+    "使うかどうかは自己責任で決めてください。結果について Kunai は責任を負いません。"
+)
+
+
 class SettingsDialog(QDialog):
     """通知・ログイン・更新をまとめた設定画面。
 
@@ -321,7 +329,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                vault: Vault, parent=None):
+                vault: Vault, custom_launch_path: str = "", parent=None):
         super().__init__(parent)
         self.vault = vault
         self.setWindowTitle("設定")
@@ -401,6 +409,38 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
+        # -- 起動コマンド (上級者向け) ---------------------------------------
+        launch_title = QLabel("起動コマンド (上級者向け)")
+        launch_title.setObjectName("SectionTitle")
+        layout.addWidget(launch_title)
+
+        launch_desc = QLabel(
+            "アカウントを切り替えて VALORANT を起動するとき、Riot Client の代わりに"
+            "ここで指定したショートカット (.lnk) や実行ファイル (.exe / .bat) を使います。"
+            "音声とテキストで別の言語にする外部ツールのショートカットなどを通したいときに使えます。"
+            "空欄なら通常どおり起動します。"
+        )
+        launch_desc.setObjectName("SubTitle")
+        launch_desc.setWordWrap(True)
+        layout.addWidget(launch_desc)
+
+        launch_warn = QLabel("⚠ " + LAUNCH_DISCLAIMER)
+        launch_warn.setWordWrap(True)
+        launch_warn.setStyleSheet(
+            f"color:{theme.WARN}; font-size:12px; border:1px solid {theme.WARN};"
+            " border-radius:4px; padding:7px 9px;"
+        )
+        layout.addWidget(launch_warn)
+
+        launch_row = QHBoxLayout()
+        self.custom_launch = QLineEdit(custom_launch_path)
+        self.custom_launch.setPlaceholderText(r"例: C:\Users\...\Desktop\VALORANT Custom Language.lnk")
+        launch_row.addWidget(self.custom_launch, 1)
+        browse = QPushButton("参照…")
+        browse.clicked.connect(self._browse_launch)
+        launch_row.addWidget(browse)
+        layout.addLayout(launch_row)
+
         # -- プレイヤー検索 ---------------------------------------------
         search_title = QLabel("プレイヤー検索 / 戦績のAPIモード")
         search_title.setObjectName("SectionTitle")
@@ -474,6 +514,17 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _browse_launch(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "起動に使うショートカット / 実行ファイルを選ぶ", "",
+            "ショートカット・実行ファイル (*.lnk *.exe *.bat *.cmd);;すべてのファイル (*)",
+        )
+        if path:
+            self.custom_launch.setText(path)
+
+    def custom_launch_text(self) -> str:
+        return self.custom_launch.text().strip().strip('"')
 
     def _open_guide(self) -> None:
         from .guide import GuideDialog
