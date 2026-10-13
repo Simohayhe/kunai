@@ -3,3 +3,4 @@ requests>=2.31
 psutil>=5.9
 cryptography>=42.0
 PyYAML>=6.0
+zstandard>=0.22

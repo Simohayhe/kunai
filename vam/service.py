@@ -14,7 +14,9 @@ from .match_cache import MatchCache
 from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
-from .riot import api, auth, autologin, content, henrik, launcher, localapi, process, session, status
+from .riot import (
+    api, auth, autologin, content, henrik, langpack, launcher, localapi, process, session, status,
+)
 
 Progress = Callable[[str], None]
 
@@ -316,6 +318,8 @@ MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 SETTING_SORT_MODE = "sort_mode"
 SETTING_CUSTOM_LAUNCH = "custom_launch_path"
+SETTING_LANG_VOICE = "lang_voice"
+SETTING_LANG_TEXT = "lang_text"
 # アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
 SORT_MODES = ("recent", "manual", "rank")
 
@@ -440,6 +444,70 @@ class AccountService:
         settings = self.vault.settings()
         settings[SETTING_DISCORD_MENTION] = value.strip()
         self.vault.save_settings(settings)
+
+    # -- 音声とテキストの言語を別々にする (自己責任の上級者向け) ----------------
+    @property
+    def lang_voice(self) -> str:
+        return str(self.vault.settings().get(SETTING_LANG_VOICE, ""))
+
+    @property
+    def lang_text(self) -> str:
+        return str(self.vault.settings().get(SETTING_LANG_TEXT, ""))
+
+    def set_languages(self, voice: str, text: str) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_LANG_VOICE] = voice.strip()
+        settings[SETTING_LANG_TEXT] = text.strip()
+        self.vault.save_settings(settings)
+
+    def language_split(self) -> tuple[str, str] | None:
+        """(音声, テキスト) の言語。どちらも選んでいて、違うときだけ有効。"""
+        voice, text = self.lang_voice, self.lang_text
+        return (voice, text) if voice and text and voice != text else None
+
+    def _language_region(self) -> str:
+        """パッチ情報を引く地域。登録アカウントで一番多い地域 (既定 ap)。"""
+        counts: dict[str, int] = {}
+        for acc in self.vault.accounts():
+            if acc.region in api.REGIONS:
+                counts[acc.region] = counts.get(acc.region, 0) + 1
+        return max(counts, key=counts.get) if counts else "ap"
+
+    def prepare_language_packs(self, progress: Progress = _noop) -> str:
+        """設定した言語のファイルを、いま取得して Kunai のフォルダに置く (起動を待たせないため)。"""
+        split = self.language_split()
+        if not split:
+            raise ServiceError("音声とテキストに、別々の言語を選んでください")
+        try:
+            langpack.ensure_packs(langpack.store_dir(self.vault.app_dir), list(split),
+                                  self._language_region(), progress, force=True)
+        except langpack.LangPackError as exc:
+            raise ServiceError(str(exc)) from exc
+        return f"音声 {split[0]} / テキスト {split[1]} のファイルを準備しました"
+
+    def restore_language_files(self) -> None:
+        """差し替えたテキストファイルを、音声言語本来のものに戻す。"""
+        voice = self.lang_voice
+        if not voice:
+            raise ServiceError("音声の言語が設定されていません")
+        try:
+            langpack.restore_original(langpack.store_dir(self.vault.app_dir), voice)
+        except (langpack.LangPackError, OSError) as exc:
+            raise ServiceError(str(exc)) from exc
+
+    def _prepare_language_swap(self, progress: Progress, warnings: list[str]):
+        """起動の前に、言語の差し替えの準備をする。差し替えるなら (paks, voice, text)。"""
+        split = self.language_split()
+        if not split or process.mock_mode():
+            return None
+        try:
+            progress("言語ファイルを準備中…")
+            paks = langpack.prepare_launch(langpack.store_dir(self.vault.app_dir),
+                                           split[0], split[1], self._language_region(), progress)
+            return paks, split[0], split[1]
+        except (langpack.LangPackError, OSError) as exc:
+            warnings.append(f"言語の差し替えはスキップしました (通常の言語で起動します): {exc}")
+            return None
 
     @property
     def custom_launch_path(self) -> str:
@@ -864,6 +932,8 @@ class AccountService:
         launched = False
         if launch_game or method == "autologin" or client_only:
             # client_only: ゲームは起動せず、Riot Client にログインさせるだけ
+            language_swap = (self._prepare_language_swap(progress, warnings)
+                             if launch_game else None)
             progress("Riot Client を起動中…")
             custom = self.custom_launch_path if (launch_game and not process.mock_mode()) else ""
             if custom:
@@ -875,6 +945,11 @@ class AccountService:
                     launcher.launch(launcher.PRODUCT_VALORANT)
             else:
                 launcher.launch(launcher.PRODUCT_VALORANT if launch_game else None)
+            if language_swap:
+                # ゲームのプロセスが立ち上がった直後に、テキストの言語ファイルを差し替える
+                paks, voice, text = language_swap
+                langpack.start_swap_thread(langpack.store_dir(self.vault.app_dir),
+                                           paks, voice, text, cancel_event)
             launched = True
 
         if method == "session" and launched and recapture:
