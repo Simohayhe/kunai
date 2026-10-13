@@ -36,9 +36,12 @@ class MatchCache:
         if raw is None:
             return None
         try:
-            return MatchSummary(**raw)
+            summary = MatchSummary(**raw)
         except TypeError:
             return None  # 古い形式が残っていたら無視して取り直す
+        if summary.party is None:
+            return None  # パーティー情報が入る前のキャッシュ。取り直して埋める
+        return summary
 
     def put(self, puuid: str, summary: MatchSummary) -> None:
         self._load()

@@ -124,6 +124,8 @@ class MatchSummary:
     placement: int = 0  # 1 がその試合の全体トップ (score 降順)
     damage_dealt: int = 0
     damage_received: int = 0
+    # 同じパーティーで遊んだ味方 [{"puuid","name","tag"}]。None は未取得 (古いキャッシュ)
+    party: list | None = None
 
     @property
     def headshot_pct(self) -> float:
@@ -309,6 +311,14 @@ class ValorantApi:
         placement = next(
             (i + 1 for i, p in enumerate(ranked) if p.get("subject") == puuid), 0
         )
+        party_id = me.get("partyId")
+        party = [
+            {"puuid": p.get("subject", ""), "name": p.get("gameName", ""),
+             "tag": p.get("tagLine", "")}
+            for p in players
+            if party_id and p.get("partyId") == party_id and p.get("subject") != puuid
+            and p.get("teamId") == me.get("teamId")
+        ]
         return MatchSummary(
             match_id=match_id,
             map_id=match_info.get("mapId", ""),
@@ -323,6 +333,7 @@ class ValorantApi:
             enemy_score=(enemy_team or {}).get("numPoints", 0),
             placement=placement,
             damage_dealt=damage_dealt, damage_received=damage_received,
+            party=party,
         )
 
     # -- ウォレット / 所持品 -----------------------------------------------

@@ -681,8 +681,10 @@ class MatchDetailDialog(QDialog):
     """1 試合分のスコアボード。tracker.gg を参考に、味方/敵を分けて
     スコア順に並べ、デュオ/トリオ (同じパーティ) を色分けする。"""
 
-    def __init__(self, detail, parent=None):
+    def __init__(self, detail, icons=None, parent=None):
         super().__init__(parent)
+        self.detail = detail
+        self.icons = icons
         self.setWindowTitle("試合詳細")
         self.setMinimumSize(640, 540)
         self.setStyleSheet(theme.STYLESHEET)
@@ -796,6 +798,14 @@ class MatchDetailDialog(QDialog):
         )
         layout.addWidget(bar)
 
+        icon = QLabel()
+        icon.setFixedSize(30, 30)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setToolTip(p.agent_name)
+        if self.icons is not None:
+            self.icons.attach(icon, p.agent_icon, 30)
+        layout.addWidget(icon)
+
         name_col = QVBoxLayout()
         name_col.setSpacing(0)
         name = QLabel(p.riot_id + ("  (自分)" if p.is_self else ""))
@@ -813,7 +823,7 @@ class MatchDetailDialog(QDialog):
         kda.setFixedWidth(88)
         layout.addWidget(kda)
 
-        acs = QLabel(str(p.score))
+        acs = QLabel(str(self.detail.acs_of(p)))   # 総スコアではなく ACS (÷ラウンド数)
         acs.setStyleSheet("font-size:11px;")
         acs.setFixedWidth(55)
         layout.addWidget(acs)

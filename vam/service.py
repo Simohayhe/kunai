@@ -59,6 +59,23 @@ def _aggregate_rows(rows: list[MatchListRow], source: str) -> MatchStats:
         map_stat.wins += int(r.won)
     total_shots = headshots + bodyshots + legshots
     stats.headshot_pct = (headshots / total_shots * 100) if total_shots else 0.0
+
+    # パーティーの相手ごとの勝率 (情報のある試合だけ)。名前は新しい試合のものを使う
+    mates: dict[str, PartyStat] = {}
+    for r in rows:   # rows は新しい順
+        if r.party is None:
+            continue
+        stats.party_known_games += 1
+        for m in r.party:
+            key = m.get("puuid") or m.get("name", "")
+            if not key:
+                continue
+            stat = mates.setdefault(key, PartyStat(puuid=key))
+            if not stat.name and m.get("name"):
+                stat.name = f"{m['name']}#{m['tag']}" if m.get("tag") else m["name"]
+            stat.games += 1
+            stat.wins += int(r.won)
+    stats.party_stats = sorted(mates.values(), key=lambda s: (-s.games, -s.wins))[:5]
     stats.by_agent = sorted(agent_buckets.values(), key=lambda a: -a.games)
     stats.by_map = sorted(map_buckets.values(), key=lambda m: -m.games)
     return stats
@@ -112,6 +129,18 @@ class AgentStat:
 
 
 @dataclass
+class PartyStat:
+    puuid: str
+    name: str = ""
+    games: int = 0
+    wins: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        return (self.wins / self.games * 100) if self.games else 0.0
+
+
+@dataclass
 class MapStat:
     name: str
     games: int = 0
@@ -147,6 +176,8 @@ class MatchListRow:
     headshots: int = 0
     bodyshots: int = 0
     legshots: int = 0
+    # 同じパーティーだった味方 [{"puuid","name","tag"}]。None は情報なし (古い保存)
+    party: list | None = None
 
     @property
     def tier_after_name(self) -> str:
@@ -155,6 +186,15 @@ class MatchListRow:
     @property
     def kd(self) -> float:
         return self.kills / self.deaths if self.deaths else float(self.kills)
+
+    @property
+    def rounds(self) -> int:
+        return self.team_score + self.enemy_score
+
+    @property
+    def acs(self) -> int:
+        """ACS (平均戦闘スコア) = 総スコア ÷ ラウンド数。"""
+        return round(self.score / self.rounds) if self.rounds else 0
 
 
 @dataclass
@@ -210,6 +250,14 @@ class MatchDetail:
     my_team: list[MatchPlayerStat] = field(default_factory=list)
     enemy_team: list[MatchPlayerStat] = field(default_factory=list)
 
+    @property
+    def rounds(self) -> int:
+        return self.my_team_score + self.enemy_team_score
+
+    def acs_of(self, player: "MatchPlayerStat") -> int:
+        """そのプレイヤーの ACS (総スコア ÷ ラウンド数)。"""
+        return round(player.score / self.rounds) if self.rounds else 0
+
 
 @dataclass
 class MatchStats:
@@ -220,6 +268,9 @@ class MatchStats:
     headshot_pct: float = 0.0
     by_agent: list[AgentStat] = field(default_factory=list)
     by_map: list[MapStat] = field(default_factory=list)
+    # 一緒に遊んだ回数の多い順 (最大 5 人)。パーティー情報のある試合だけで集計
+    party_stats: list["PartyStat"] = field(default_factory=list)
+    party_known_games: int = 0
     # "api" (HenrikDev、サインイン不要) / "local" (ローカル API、要サインイン)
     source: str = "local"
     # 保存済みの戦績を出しているとき: 最後に取得できた時刻 (epoch 秒)。
@@ -1502,6 +1553,13 @@ class AccountService:
                 headshots=pstats.get("headshots", 0),
                 bodyshots=pstats.get("bodyshots", 0),
                 legshots=pstats.get("legshots", 0),
+                party=[
+                    {"puuid": p.get("puuid", ""), "name": p.get("name", ""),
+                     "tag": p.get("tag", "")}
+                    for p in all_players
+                    if player.get("party_id") and p.get("party_id") == player.get("party_id")
+                    and p.get("team_id") == player.get("team_id") and p.get("puuid") != puuid
+                ],
             ))
         return rows
 
@@ -1578,7 +1636,7 @@ class AccountService:
                 agent_name=agents.get(summary.character_id, {}).get("name", ""),
                 map_name=maps.get(summary.map_id, {}).get("name", ""),
                 headshots=summary.headshots, bodyshots=summary.bodyshots,
-                legshots=summary.legshots,
+                legshots=summary.legshots, party=summary.party,
             ))
         self.match_cache.save()
         return rows

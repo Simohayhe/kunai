@@ -52,6 +52,9 @@ class IconLoader(QObject):
         self.cache_dir = Path(cache_dir)
         self._pending: set[str] = set()
         self._pixmaps: dict[str, QPixmap] = {}
+        # 取得待ちのラベル: url -> [(QLabel, size)]。取れたら自動で絵を入れる
+        self._waiting: dict[str, list] = {}
+        self.loaded.connect(self._fill_waiting)
 
     def _path_for(self, url: str) -> Path:
         digest = hashlib.sha1(url.encode()).hexdigest()[:20]
@@ -78,6 +81,34 @@ class IconLoader(QObject):
             _ALIVE.add(fetch)
             QThreadPool.globalInstance().start(fetch)
         return None
+
+    def attach(self, label, url: str | None, size: int = 28) -> None:
+        """ラベルにアイコンを入れる。未取得なら、取れた時点で自動で入れる。"""
+        if not url:
+            return
+        pm = self.pixmap(url)
+        if pm is not None:
+            self._set(label, pm, size)
+        else:
+            self._waiting.setdefault(url, []).append((label, size))
+
+    @staticmethod
+    def _set(label, pm: QPixmap, size: int) -> None:
+        from PySide6.QtCore import Qt
+        try:
+            label.setPixmap(pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except RuntimeError:
+            pass  # ラベルが既に消えている (画面が作り直された)
+
+    def _fill_waiting(self, url: str, path: str) -> None:
+        waiting = self._waiting.pop(url, [])
+        if not waiting:
+            return
+        pm = self.take(url, path)
+        if pm is None:
+            return
+        for label, size in waiting:
+            self._set(label, pm, size)
 
     def take(self, url: str, path: str) -> QPixmap | None:
         """loaded シグナル受信後に呼ぶ。"""

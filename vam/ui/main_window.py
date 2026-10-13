@@ -350,6 +350,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(top)
 
         self.detail = DetailPanel()
+        self.detail.history.icons = self.icons
         self.detail.history.reload_requested.connect(self.load_history)
         self.detail.history.match_clicked.connect(self.open_match_detail)
         self.detail.inventory.reload_requested.connect(self.load_inventory)
@@ -1310,7 +1311,13 @@ class MainWindow(QMainWindow):
         except Exception:
             maps = {}
         self.detail.history.set_stats(stats)
-        self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names())
+        try:
+            agent_icons = {a["name"]: a["icon"] for a in self.service.content.agents().values()
+                           if a.get("icon")}
+        except Exception:
+            agent_icons = {}
+        self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names(),
+                                        agent_icons)
 
     def _on_history_failed(self, account_id: str, message: str) -> None:
         if self.selected_id != account_id:
@@ -1332,7 +1339,7 @@ class MainWindow(QMainWindow):
 
     def _on_match_detail_loaded(self, detail) -> None:
         self.status.showMessage("")
-        MatchDetailDialog(detail, parent=self).exec()
+        MatchDetailDialog(detail, icons=self.icons, parent=self).exec()
 
     def _show_inventory(self, account: Account) -> None:
         """キャッシュがあればそれを出し、無ければ集計する (ボタンを押させない)。"""

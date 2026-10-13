@@ -775,7 +775,7 @@ def test_match_cache() -> None:
 
     summary = MatchSummary(match_id="match1", map_id="map1", character_id="agent1",
                            won=True, kills=20, deaths=10, headshots=5,
-                           bodyshots=10, legshots=1)
+                           bodyshots=10, legshots=1, party=[])
     cache.put("puuid1", summary)
     check("保存前はファイル未作成", not cache.path.exists())
     cache.save()
@@ -787,6 +787,8 @@ def test_match_cache() -> None:
     check("内容が一致する", got.kills == 20 and got.won is True)
     check("他アカウントには漏れない", reloaded.get("puuid2", "match1") is None)
     check("別試合は別物", reloaded.get("puuid1", "match2") is None)
+    cache.put("puuid1", MatchSummary(match_id="old", won=True))   # party 情報の無い古い形
+    check("パーティー情報の無い古いキャッシュは取り直す", cache.get("puuid1", "old") is None)
 
 
 def test_match_stats_api_mode() -> None:
@@ -1442,6 +1444,83 @@ def test_borrowed_history() -> None:
         api.ValorantApi, svc.authenticate, svc._authenticate_via_local_api = saved
 
 
+def test_match_extras() -> None:
+    section("ACS・パーティー勝率・アイコン")
+    from vam.riot.api import ValorantApi, AuthResult
+    from vam.service import (
+        MatchDetail, MatchListRow, MatchPlayerStat, _aggregate_rows,
+    )
+
+    # ACS = 総スコア ÷ ラウンド数 (総スコアそのものではない)
+    row = MatchListRow(score=5734, team_score=13, enemy_score=9)
+    check("ACS は総スコア÷ラウンド数", row.acs == 261 and row.rounds == 22, f"{row.acs}")
+    check("ラウンド 0 でも落ちない", MatchListRow(score=100).acs == 0)
+    check("ACS が現実的な範囲 (500 前後まで)", MatchListRow(score=9000, team_score=13, enemy_score=12).acs < 500)
+    detail = MatchDetail(my_team_score=13, enemy_team_score=9,
+                         my_team=[MatchPlayerStat(score=4622)])
+    check("スコアボードの ACS", detail.acs_of(detail.my_team[0]) == 210, str(detail.acs_of(detail.my_team[0])))
+
+    # パーティーの相手ごとの勝率
+    def r(i, won, party):
+        return MatchListRow(match_id=str(i), won=won, started_at=1000 - i, party=party)
+    A = {"puuid": "A", "name": "Alice", "tag": "1"}
+    B = {"puuid": "B", "name": "Bob", "tag": "2"}
+    C = {"puuid": "C", "name": "", "tag": ""}
+    rows = [r(1, True, [A]), r(2, False, [A, B]), r(3, True, [A]), r(4, True, []),
+            r(5, False, [B]), r(6, True, None)]       # None = パーティー情報なし
+    stats = _aggregate_rows(rows, "api")
+    names = [(p.name, p.games, p.wins) for p in stats.party_stats]
+    check("一緒に遊んだ多い順", names == [("Alice#1", 3, 2), ("Bob#2", 2, 0)], str(names))
+    check("情報のある試合だけで集計", stats.party_known_games == 5, str(stats.party_known_games))
+    check("勝率", round(stats.party_stats[0].win_rate) == 67)
+    many = [r(i, True, [{"puuid": f"P{i % 7}", "name": f"P{i % 7}", "tag": "x"}]) for i in range(30)]
+    check("最大 5 人まで", len(_aggregate_rows(many, "api").party_stats) == 5)
+    check("名前が非公開でも puuid で数える",
+          _aggregate_rows([r(1, True, [C]), r(2, True, [C])], "api").party_stats[0].games == 2)
+
+    # 試合詳細から party を取り出す
+    class Fake(ValorantApi):
+        def match_details(self, match_id):
+            return {"players": [
+                {"subject": "me", "teamId": "Red", "partyId": "p1", "characterId": "x", "stats": {}},
+                {"subject": "mate", "teamId": "Red", "partyId": "p1", "gameName": "Mate",
+                 "tagLine": "7", "characterId": "x", "stats": {}},
+                {"subject": "solo", "teamId": "Red", "partyId": "p2", "characterId": "x", "stats": {}},
+                {"subject": "enemy", "teamId": "Blue", "partyId": "p1", "characterId": "x", "stats": {}}],
+                "teams": [{"teamId": "Red", "won": True, "numPoints": 13},
+                          {"teamId": "Blue", "won": False, "numPoints": 5}],
+                "matchInfo": {"mapId": "m", "gameStartMillis": 1}, "roundResults": []}
+    fake = Fake(AuthResult(access_token="t", puuid="me"))
+    summary = fake.match_summary("mid", puuid="me")
+    check("パーティーの味方だけが入る (自分・ソロ・敵は入らない)",
+          [m["puuid"] for m in summary.party] == ["mate"], str(summary.party))
+    check("名前とタグが入る", summary.party[0]["name"] == "Mate" and summary.party[0]["tag"] == "7")
+
+    # アイコン: 未取得なら待ち、取れたら自動で入る
+    import tempfile as _tf
+    from PySide6.QtWidgets import QApplication, QLabel
+    from PySide6.QtGui import QPixmap, QColor
+    from vam.ui.icons import IconLoader
+    QApplication.instance() or QApplication([])
+    d = Path(_tf.mkdtemp())
+    loader = IconLoader(d)
+    pm = QPixmap(10, 10); pm.fill(QColor("red"))
+    url = "https://example.invalid/a.png"
+    path = loader._path_for(url)
+    label = QLabel()
+    loader._pending.add(url)          # 取得中の体 (通信はしない)
+    loader._waiting.setdefault(url, []).append((label, 20))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pm.save(str(path), "PNG")
+    loader.loaded.emit(url, str(path))
+    check("取れたらラベルに絵が入る", label.pixmap() is not None and not label.pixmap().isNull())
+    label2 = QLabel()
+    loader.attach(label2, url, 20)
+    check("取得済みならその場で入る", label2.pixmap() is not None and not label2.pixmap().isNull())
+    loader.attach(QLabel(), None, 20)
+    check("URL 無しは何もしない", True)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1707,7 +1786,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras,
                test_status_notify, test_ui):
         try:
             fn()

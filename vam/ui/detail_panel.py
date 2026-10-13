@@ -259,6 +259,11 @@ class HistoryTab(QWidget):
         self.map_label.setWordWrap(True)
         summary_layout.addWidget(self.map_label)
 
+        self.party_label = QLabel()
+        self.party_label.setObjectName("SubTitle")
+        self.party_label.setWordWrap(True)
+        summary_layout.addWidget(self.party_label)
+
         layout.addWidget(self.summary)
 
         self.scroll = QScrollArea()
@@ -322,6 +327,23 @@ class HistoryTab(QWidget):
                 f"{m.name} {m.win_rate:.0f}%({m.wins}/{m.games})" for m in stats.by_map
             )
         )
+        party = getattr(stats, "party_stats", [])
+        if party:
+            self.party_label.setText(
+                "パーティー勝率: " + " / ".join(
+                    f"{p.name or '非公開のプレイヤー'} {p.win_rate:.0f}%({p.wins}/{p.games})"
+                    for p in party
+                )
+            )
+            self.party_label.setToolTip(
+                f"一緒に遊んだ回数の多い順に最大 5 人。パーティー情報のある "
+                f"{getattr(stats, 'party_known_games', 0)} 試合から集計しています。")
+        elif getattr(stats, "party_known_games", 0):
+            self.party_label.setText("パーティー勝率: 誰ともパーティーを組んでいません")
+            self.party_label.setToolTip("")
+        else:
+            self.party_label.setText("パーティー勝率: 更新するとここに出ます")
+            self.party_label.setToolTip("")
 
     @staticmethod
     def _set_tile(tile: QFrame, value: str) -> None:
@@ -330,8 +352,13 @@ class HistoryTab(QWidget):
         if item and item.widget():
             item.widget().setText(value)
 
+    # アイコンの取得元。MainWindow が渡す (未設定ならアイコン無しで表示)
+    icons = None
+
     def set_matches(self, matches: list, map_names: dict,
-                    tier_names: dict | None = None) -> None:
+                    tier_names: dict | None = None,
+                    agent_icons: dict | None = None) -> None:
+        self._agent_icons = agent_icons or {}
         self.clear()
         if not matches:
             self.set_message("コンペティティブの記録がありません")
@@ -363,7 +390,15 @@ class HistoryTab(QWidget):
         delta.setFixedWidth(40)
         top.addWidget(delta)
 
-        map_name = map_names.get(m.map_id, {}).get("name") or "不明なマップ"
+        icon = QLabel()
+        icon.setFixedSize(28, 28)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setToolTip(m.agent_name)
+        if self.icons is not None:
+            self.icons.attach(icon, getattr(self, "_agent_icons", {}).get(m.agent_name), 28)
+        top.addWidget(icon)
+
+        map_name = map_names.get(m.map_id, {}).get("name") or m.map_name or "不明なマップ"
         name = QLabel(map_name)
         name.setStyleSheet("font-size:12px; font-weight:600;")
         top.addWidget(name, 1)
@@ -386,7 +421,7 @@ class HistoryTab(QWidget):
 
         stats_text = (
             f"{m.kills}/{m.deaths}/{m.assists}  ·  K/D {m.kd:.2f}  ·  "
-            f"ACS {m.score}  ·  HS {m.headshot_pct:.0f}%  ·  "
+            f"ACS {m.acs}  ·  HS {m.headshot_pct:.0f}%  ·  "
             f"DDΔ {m.damage_delta:+d}"
         )
         if m.placement:
