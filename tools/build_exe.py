@@ -55,7 +55,6 @@ def build() -> Path:
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),
         "--collect-submodules", "vam",
-        "--hidden-import", "zstandard",   # 言語ファイルの取得 (langpack) で使う
     ]
     if ICON.is_file():
         args += ["--icon", str(ICON), "--add-data", f"{ICON};assets"]

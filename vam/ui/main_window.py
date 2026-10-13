@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
 
 from .. import browser, diagnostics, updater
 from ..models import Account
-from ..riot import langpack
 from ..riot import process as riot_process
 from ..service import STEP_LABELS, AccountService
 from ..storage import Vault
@@ -25,7 +24,7 @@ from . import theme, workers
 from .account_card import AccountCard, AccountListContainer
 from .detail_panel import DetailPanel
 from .dialogs import (
-    LANGUAGE_DISCLAIMER, AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
+    AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
 )
 from .icons import IconLoader
 from .refresh_progress import RefreshProgressBar
@@ -719,13 +718,8 @@ class MainWindow(QMainWindow):
             henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
             vault=self.vault,
-            lang_voice=self.service.lang_voice,
-            lang_text=self.service.lang_text,
-            locales=langpack.available_locales(),
             parent=self,
         )
-        dialog.lang_prepare_button.clicked.connect(lambda: self._prepare_languages(dialog))
-        dialog.lang_restore_button.clicked.connect(lambda: self._restore_languages(dialog))
         dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
         dialog.update_button.clicked.connect(lambda: self._start_update(dialog))
         if self._pending_release:
@@ -736,53 +730,7 @@ class MainWindow(QMainWindow):
             self.service.login_step_delay = dialog.step_delay()
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.service.henrik_api_key = dialog.henrik_api_key()
-            self._save_languages(dialog.language_voice(), dialog.language_text())
             self.status.showMessage("設定を保存しました", 4000)
-
-    def _save_languages(self, voice: str, text: str) -> None:
-        """音声/テキストの言語を保存する。新しく有効にするときは、リスクを確認してから。"""
-        if (voice, text) == (self.service.lang_voice, self.service.lang_text):
-            return
-        if voice and text and voice != text:
-            answer = QMessageBox.warning(
-                self, "言語の差し替えの確認",
-                LANGUAGE_DISCLAIMER + "\n\n自己責任で使います。よろしいですか？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                self.status.showMessage("言語の設定は変更しませんでした", 4000)
-                return
-        self.service.set_languages(voice, text)
-
-    def _prepare_languages(self, dialog: SettingsDialog) -> None:
-        """設定画面で選んだ言語のファイルを、いま取得する (保存はまだ)。"""
-        voice, text = dialog.language_voice(), dialog.language_text()
-        if not voice or not text or voice == text:
-            dialog.set_lang_status("音声とテキストに、別々の言語を選んでください")
-            return
-        # 取得は設定を保存する前でもできるよう、一時的に保存せず直接呼ぶ
-        dialog.set_lang_status("準備中…", busy=True)
-        store = langpack.store_dir(self.vault.app_dir)
-        region = self.service._language_region()
-        workers.run(
-            langpack.ensure_packs, store, [voice, text], region,
-            force=True,
-            on_progress=lambda m: dialog.set_lang_status(m, busy=True),
-            on_done=lambda _r: dialog.set_lang_status(
-                "準備できました。設定を保存すると、次の起動から差し替えます"),
-            on_error=lambda m: dialog.set_lang_status(f"失敗しました: {m}"),
-        )
-
-    def _restore_languages(self, dialog: SettingsDialog) -> None:
-        voice = dialog.language_voice() or self.service.lang_voice
-        if not voice:
-            dialog.set_lang_status("音声の言語を選んでください")
-            return
-        try:
-            langpack.restore_original(langpack.store_dir(self.vault.app_dir), voice)
-            dialog.set_lang_status("音声の言語本来のテキストに戻しました")
-        except Exception as exc:
-            dialog.set_lang_status(f"戻せませんでした: {exc}")
 
     def open_player_search(self) -> None:
         dialog = PlayerSearchDialog(parent=self)

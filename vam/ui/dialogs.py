@@ -311,13 +311,6 @@ class AccountDialog(QDialog):
         return a
 
 
-LANGUAGE_DISCLAIMER = (
-    "公式にサポートされていない方法です。ゲームの言語ファイルを書き換えるため、"
-    "Vanguard に検知されてアカウントが停止 (BAN) される可能性があります。"
-    "使うかどうかは自己責任で決めてください。結果について Kunai は責任を負いません。"
-)
-
-
 class CollapsibleSection(QFrame):
     """見出しをクリックして開閉できる項目 (プルダウン)。中身は body に入れる。"""
 
@@ -372,8 +365,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                vault: Vault, lang_voice: str = "", lang_text: str = "",
-                locales: list | None = None, parent=None):
+                vault: Vault, parent=None):
         super().__init__(parent)
         self.vault = vault
         self.setWindowTitle("設定")
@@ -468,58 +460,6 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
-        # -- 音声とテキストの言語 (上級者向け) -----------------------------------
-        layout = section("language", "音声とテキストの言語 (上級者向け)")
-        lang_desc = QLabel(
-            "音声は英語のまま、文字だけ日本語にする、といった組み合わせにします。"
-            "VALORANT を Kunai から起動するとき、ゲームが立ち上がった直後に、"
-            "テキストの言語ファイル (*_Text-WindowsClient.pak / .sig) を、選んだ言語のものに"
-            "差し替えます。音声のファイルには触りません。"
-            "\n先に Riot Client のゲーム言語を「音声にしたい言語」にして、VALORANT を一度更新しておいてください。"
-            "どちらかを「変更しない」にすると、この機能は使いません。"
-        )
-        lang_desc.setObjectName("SubTitle")
-        lang_desc.setWordWrap(True)
-        layout.addWidget(lang_desc)
-
-        lang_warn = QLabel("⚠ " + LANGUAGE_DISCLAIMER)
-        lang_warn.setWordWrap(True)
-        lang_warn.setStyleSheet(
-            f"color:{theme.WARN}; font-size:12px; border:1px solid {theme.WARN};"
-            " border-radius:4px; padding:7px 9px;"
-        )
-        layout.addWidget(lang_warn)
-
-        from ..riot.langpack import LOCALE_LABELS
-        lang_form = QFormLayout()
-        lang_form.setSpacing(9)
-        self.lang_voice = QComboBox()
-        self.lang_text = QComboBox()
-        choices = list(dict.fromkeys(locales or list(LOCALE_LABELS)))
-        for combo, current in ((self.lang_voice, lang_voice), (self.lang_text, lang_text)):
-            combo.addItem("変更しない", "")
-            for code in choices:
-                combo.addItem(f"{LOCALE_LABELS.get(code, code)} ({code})", code)
-            index = combo.findData(current)
-            combo.setCurrentIndex(max(index, 0))
-        lang_form.addRow("音声の言語", self.lang_voice)
-        lang_form.addRow("テキストの言語", self.lang_text)
-        layout.addLayout(lang_form)
-
-        lang_row = QHBoxLayout()
-        self.lang_prepare_button = QPushButton("言語ファイルを今すぐ準備")
-        self.lang_prepare_button.setToolTip("Riot の配布サーバーから取得して保存します (起動時に自動でも行います)")
-        lang_row.addWidget(self.lang_prepare_button)
-        self.lang_restore_button = QPushButton("元に戻す")
-        self.lang_restore_button.setToolTip("差し替えたテキストを、音声の言語本来のものに戻します")
-        lang_row.addWidget(self.lang_restore_button)
-        lang_row.addStretch(1)
-        layout.addLayout(lang_row)
-        self.lang_status = QLabel()
-        self.lang_status.setObjectName("SubTitle")
-        self.lang_status.setWordWrap(True)
-        layout.addWidget(self.lang_status)
-
         # -- プレイヤー検索 ---------------------------------------------
         layout = section("search", "プレイヤー検索 / 戦績のAPIモード")
         search_desc = QLabel(
@@ -586,21 +526,6 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
-
-    def language_voice(self) -> str:
-        return self.lang_voice.currentData() or ""
-
-    def language_text(self) -> str:
-        return self.lang_text.currentData() or ""
-
-    def set_lang_status(self, text: str, busy: bool = False) -> None:
-        try:
-            self.sections["language"].set_expanded(True)
-            self.lang_status.setText(text)
-            self.lang_prepare_button.setEnabled(not busy)
-            self.lang_restore_button.setEnabled(not busy)
-        except RuntimeError:
-            pass  # 設定画面が先に閉じられた
 
     def _open_guide(self) -> None:
         from .guide import GuideDialog
