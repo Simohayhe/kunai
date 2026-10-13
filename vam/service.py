@@ -4,6 +4,7 @@ UI からはここだけを呼ぶ。進捗はコールバックで文字列を�
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 from typing import Callable, Iterable
@@ -15,7 +16,7 @@ from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
 from .riot import (
-    api, auth, autologin, content, henrik, launcher, localapi, process, session, status,
+    api, auth, autologin, content, henrik, launcher, localapi, process, session, status, windows,
 )
 
 Progress = Callable[[str], None]
@@ -360,6 +361,8 @@ DEFAULT_LOGIN_STEP_DELAY = 0.5
 MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 SETTING_SORT_MODE = "sort_mode"
+SETTING_AUTO_STORE = "auto_store"
+SETTING_AUTO_STORE_LAST = "auto_store_last"
 # アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
 SORT_MODES = ("recent", "manual", "rank")
 
@@ -1378,8 +1381,71 @@ class AccountService:
             return None   # 終了日が過ぎている (次のアクトの情報がまだ無い)
         return {"name": act["name"], "end": act["end"], "seconds_left": act["end"] - now}
 
+    # -- ストアの自動取得 ------------------------------------------------------
+    @property
+    def auto_store(self) -> bool:
+        """ストアを毎日自動で取得するか (既定は切)。"""
+        return bool(self.vault.settings().get(SETTING_AUTO_STORE, False))
+
+    @auto_store.setter
+    def auto_store(self, value: bool) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_AUTO_STORE] = bool(value)
+        self.vault.save_settings(settings)
+
+    @property
+    def auto_store_last(self) -> float:
+        return float(self.vault.settings().get(SETTING_AUTO_STORE_LAST, 0.0))
+
+    def mark_auto_store_run(self, when: float | None = None) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_AUTO_STORE_LAST] = time.time() if when is None else when
+        self.vault.save_settings(settings)
+
+    # ストアが入れ替わるのは毎日 00:00 UTC (日本時間 9:00)
+    STORE_RESET_SECONDS = 86400
+
+    def store_stale_accounts(self, now: float | None = None) -> list[Account]:
+        """今日のストアをまだ持っていないアカウント (保存が無い / 入れ替わり済み)。
+        セッションが保存されているものだけ。"""
+        now = time.time() if now is None else now
+        out = []
+        for acc in self.vault.accounts():
+            if not acc.session_saved:
+                continue
+            saved = self.saved_store(acc)
+            if saved is None or saved.expired(now) or not saved.daily_ends_at:
+                out.append(acc)
+        return out
+
+    def auto_store_due(self, now: float | None = None) -> bool:
+        """自動取得をいま始めてよいか。切のとき / Riot Client かゲームが動いているとき /
+        直近 (6 時間以内) に試したばかりのとき / 取るものが無いときは False。"""
+        now = time.time() if now is None else now
+        if not self.auto_store or process.mock_mode():
+            return False
+        if process.running():       # Riot Client もゲームも止まっているときだけ
+            return False
+        if now - self.auto_store_last < 6 * 3600:
+            return False
+        return bool(self.store_stale_accounts(now))
+
     def refresh_cycle(self, accounts: Iterable[Account], progress: Progress = _noop,
-                      cancel_event=None, events: Events = None) -> dict[str, RefreshReport]:
+                      cancel_event=None, events: Events = None,
+                      steps: Iterable[str] = REFRESH_STEPS,
+                      hide_windows: bool = True) -> dict[str, RefreshReport]:
+        """入れ替え更新。Riot Client の画面は、出てきたそばから最小化して見せない。"""
+        stop_hide = threading.Event()
+        if hide_windows and not process.mock_mode():
+            windows.keep_minimized(stop_hide)
+        try:
+            return self._run_refresh_cycle(accounts, progress, cancel_event, events, tuple(steps))
+        finally:
+            stop_hide.set()
+
+    def _run_refresh_cycle(self, accounts: Iterable[Account], progress: Progress,
+                           cancel_event, events: Events,
+                           steps: tuple[str, ...]) -> dict[str, RefreshReport]:
         """アカウントを 1 つずつ Riot Client で起動 → 取得 → 停止、を繰り返す。
 
         現行の Riot Client のセッションは起動中のクライアントからしかトークンを
@@ -1432,7 +1498,7 @@ class AccountService:
                     diagnostics.log(f"refresh_cycle: 停止に失敗: {exc}")
                 break
             report = self.refresh_account(acc, progress=tagged, auth_error=switch_error,
-                                          cancel_event=cancel_event, events=emit)
+                                          cancel_event=cancel_event, events=emit, steps=steps)
             reports[acc.id] = report
             emit({"kind": "account_done", "id": acc.id, "held": report.held,
                   "partial": bool(report.errors) and not report.held})

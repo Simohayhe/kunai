@@ -365,7 +365,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                vault: Vault, parent=None):
+                vault: Vault, auto_store: bool = False, parent=None):
         super().__init__(parent)
         self.vault = vault
         self.setWindowTitle("設定")
@@ -460,6 +460,22 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
+        # -- ストアの自動取得 -----------------------------------------------
+        layout = section("store", "ストアの自動取得")
+        store_desc = QLabel(
+            "ストアが入れ替わった (日本時間 9:00) あと、まだ今日のストアを持っていない"
+            "アカウントの分を、Kunai が裏で取得して保存します。Riot Client を画面に出さず"
+            "(最小化して)、アカウントを 1 つずつ「起動 → 取得 → 停止」します。"
+            "Riot Client もゲームも止まっているときだけ動き、使っている最中には割り込みません。"
+            "取得できなかったときは、6 時間あけてもう一度試します。"
+        )
+        store_desc.setObjectName("SubTitle")
+        store_desc.setWordWrap(True)
+        layout.addWidget(store_desc)
+        self.auto_store = QCheckBox("ストアを毎日自動で取得する")
+        self.auto_store.setChecked(auto_store)
+        layout.addWidget(self.auto_store)
+
         # -- プレイヤー検索 ---------------------------------------------
         layout = section("search", "プレイヤー検索 / 戦績のAPIモード")
         search_desc = QLabel(
@@ -526,6 +542,9 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def auto_store_enabled(self) -> bool:
+        return self.auto_store.isChecked()
 
     def _open_guide(self) -> None:
         from .guide import GuideDialog

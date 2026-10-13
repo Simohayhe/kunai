@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from .. import browser, diagnostics, updater
 from ..models import Account
 from ..riot import process as riot_process
-from ..service import STEP_LABELS, AccountService
+from ..service import REFRESH_STEPS, STEP_LABELS, AccountService
 from ..storage import Vault
 from ..version import __version__
 from . import theme, workers
@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         # 一括更新で 3 つとも失敗したアカウント id -> {ステップ名: 理由} (保留)
         self._held: dict[str, dict[str, str]] = {}
         self._cycling = False   # 一括更新で Riot Client を入れ替えている最中
+        self._cycle_auto = False  # いまの入れ替えは、ストアの自動取得か
         self._refresh_cancel_event: threading.Event | None = None
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
         # ので、アカウントごとに結果をキャッシュして毎回の集計を省く。
@@ -124,6 +125,12 @@ class MainWindow(QMainWindow):
         self._act_timer.setSingleShot(True)
         self._act_timer.timeout.connect(self._render_act)
         self.update_act_countdown()
+
+        # ストアの自動取得 (設定が入のときだけ動く)。5 分ごとに条件を見る
+        self._auto_store_timer = QTimer(self)
+        self._auto_store_timer.timeout.connect(self.check_auto_store)
+        self._auto_store_timer.start(5 * 60 * 1000)
+        QTimer.singleShot(20_000, self.check_auto_store)   # 起動の少し後にも一度
 
         self._account_refresh_timer = QTimer(self)
         self._account_refresh_timer.timeout.connect(self.auto_refresh_current_account)
@@ -721,6 +728,7 @@ class MainWindow(QMainWindow):
             henrik_api_key=self.service.henrik_api_key,
             current_version=__version__,
             vault=self.vault,
+            auto_store=self.service.auto_store,
             parent=self,
         )
         dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
@@ -733,6 +741,7 @@ class MainWindow(QMainWindow):
             self.service.login_step_delay = dialog.step_delay()
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.service.henrik_api_key = dialog.henrik_api_key()
+            self.service.auto_store = dialog.auto_store_enabled()
             self.status.showMessage("設定を保存しました", 4000)
 
     def open_player_search(self) -> None:
@@ -1178,42 +1187,49 @@ class MainWindow(QMainWindow):
         if self.selected_id == account.id:
             self.select_account(account.id, force_reload=True)
 
-    def refresh_all(self) -> None:
-        """全アカウントのランク・戦績・スキンをまとめて更新する。
+    def refresh_all(self, _checked: bool = False, auto: bool = False) -> None:
+        """全アカウントのランク・戦績・スキン・ストアをまとめて更新する。
 
-        Riot Client を 1 アカウントずつ起動 → 取得 → 停止で入れ替えていく。
-        取れないものは飛ばして次へ進み、3 つとも取れなかったアカウントは
-        保留 (⚠) にする。VALORANT が起動中なら始めない。
+        Riot Client を 1 アカウントずつ起動 → 取得 → 停止で入れ替えていく
+        (画面は出さず、最小化する)。取れないものは飛ばして次へ進み、ランク・戦績・
+        スキンが全部取れなかったアカウントは保留 (⚠) にする。VALORANT が起動中なら
+        始めない。auto=True は、ストアの自動取得 (確認ダイアログなし・ストアだけ)。
         """
         if self._busy:
             return
-        if riot_process.game_running():
-            QMessageBox.warning(
-                self, "VALORANT が起動中です",
-                "一括更新はアカウントを順番に切り替えるので、VALORANT を終了してから"
-                "実行してください。",
+        if auto:
+            accounts = self.service.store_stale_accounts()
+            if not accounts or riot_process.running():
+                return
+        else:
+            if riot_process.game_running():
+                QMessageBox.warning(
+                    self, "VALORANT が起動中です",
+                    "一括更新はアカウントを順番に切り替えるので、VALORANT を終了してから"
+                    "実行してください。",
+                )
+                return
+            accounts = [a for a in self.vault.accounts()
+                        if a.session_saved or (self.service.henrik_api_key and a.puuid)]
+            if not accounts:
+                QMessageBox.information(
+                    self, "更新できません",
+                    "セッションが保存されたアカウントがありません。",
+                )
+                return
+            answer = QMessageBox.question(
+                self, "すべて更新",
+                f"{len(accounts)} 件を順番に Riot Client で起動 → 取得 → 停止します。\n"
+                "終わるまで Riot Client は使えません (1 件あたり数十秒かかります)。\n"
+                "取得できなかったものは飛ばして続けます。始めますか？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             )
-            return
-        accounts = [a for a in self.vault.accounts()
-                    if a.session_saved or (self.service.henrik_api_key and a.puuid)]
-        if not accounts:
-            QMessageBox.information(
-                self, "更新できません",
-                "セッションが保存されたアカウントがありません。",
-            )
-            return
-        answer = QMessageBox.question(
-            self, "すべて更新",
-            f"{len(accounts)} 件を順番に Riot Client で起動 → 取得 → 停止します。\n"
-            "終わるまで Riot Client は使えません (1 件あたり数十秒かかります)。\n"
-            "取得できなかったものは飛ばして続けます。始めますか？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-        )
-        if answer != QMessageBox.Yes:
-            return
+            if answer != QMessageBox.Yes:
+                return
         self._cycling = True
+        self._cycle_auto = auto
         self._refresh_cancel_event = threading.Event()
-        self._set_busy(True, f"{len(accounts)} 件を更新中…")
+        self._set_busy(True, f"{len(accounts)} 件を{'ストアの自動取得中' if auto else '更新中'}…")
         self.refresh_progress.begin(len(accounts))
 
         def emit(event: dict) -> None:
@@ -1225,10 +1241,20 @@ class MainWindow(QMainWindow):
         workers.run(
             self.service.refresh_cycle, accounts,
             cancel_event=self._refresh_cancel_event, events=emit,
+            steps=("store",) if auto else REFRESH_STEPS,
             on_done=self._on_refresh_all_done,
             on_error=self._on_refresh_all_failed,
             on_progress=self.status.showMessage,
         )
+
+    def check_auto_store(self) -> None:
+        """ストアの自動取得。設定が入で、Riot Client もゲームも止まっていて、
+        今日のストアを持っていないアカウントがあるときだけ、裏で取得する。"""
+        if self._busy or self._cycling or self._auto_refreshing:
+            return
+        if self.service.auto_store_due():
+            self.service.mark_auto_store_run()   # 失敗しても短時間に繰り返さない
+            self.refresh_all(auto=True)
 
     def _on_refresh_event(self, event: dict) -> None:
         # 1 アカウント終わるごとに、カードのランク表示を更新し、並びを直す
@@ -1252,6 +1278,8 @@ class MainWindow(QMainWindow):
 
     def _on_refresh_all_done(self, reports: dict) -> None:
         cancelled = bool(self._refresh_cancel_event and self._refresh_cancel_event.is_set())
+        auto = getattr(self, "_cycle_auto", False)
+        self._cycle_auto = False
         self._cycling = False
         self._refresh_cancel_event = None
         self.refresh_progress.finish()
@@ -1274,7 +1302,9 @@ class MainWindow(QMainWindow):
         self.reload_accounts()
         if self.selected_id:
             self.select_account(self.selected_id, force_reload=True)
-        if held or partial:
+        if auto:
+            self.status.showMessage(f"ストアを自動で取得しました ({len(reports)} 件)", 8000)
+        elif held or partial:
             self._show_refresh_summary(held, partial)
 
     def _show_refresh_summary(self, held: dict, partial: dict) -> None:

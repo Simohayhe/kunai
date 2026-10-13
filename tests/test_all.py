@@ -1831,6 +1831,111 @@ def test_store() -> None:
     check("詳細にストアタブがある", panel.tabText(panel.indexOf(panel.store)) == "ストア")
 
 
+def test_auto_store() -> None:
+    section("ストアの自動取得 (画面を出さずに)")
+    import threading
+    import time as _time
+    from vam.models import Account
+    from vam.riot import process, windows
+    from vam.service import AccountService, StoreData, StoreItem
+    from vam.storage import Vault
+
+    # ---- ウィンドウを最小化する (列挙と最小化を差し替えて、判断だけを確かめる)
+    shown = []
+    n = windows.minimize_riot_windows(enumerate_fn=lambda: [11, 22], show_fn=shown.append)
+    check("見つかった Riot Client のウィンドウを最小化する", n == 2 and shown == [11, 22])
+    check("無ければ何もしない", windows.minimize_riot_windows(enumerate_fn=lambda: [], show_fn=shown.append) == 0)
+    check("最小化はアクティブにしない指定", windows.SW_SHOWMINNOACTIVE == 7)
+    stop = threading.Event()
+    calls = []
+    saved_min = windows.minimize_riot_windows
+    windows.minimize_riot_windows = lambda *a, **k: calls.append(1) or 0
+    try:
+        thread = windows.keep_minimized(stop, poll=0.005)
+        _time.sleep(0.05)
+        stop.set()
+        thread.join(1)
+        check("出てくるたびに繰り返し最小化し、止められる", len(calls) >= 2 and not thread.is_alive(), str(len(calls)))
+    finally:
+        windows.minimize_riot_windows = saved_min
+
+    # ---- 設定と、自動取得してよいかの判定
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    now = 1_800_000_000.0
+    a = Account(label="a", puuid="pa", session_saved=True)
+    b = Account(label="b", puuid="pb", session_saved=True)
+    c = Account(label="c", puuid="pc", session_saved=False)
+    for acc in (a, b, c):
+        vault.add(acc)
+    check("既定は切", svc.auto_store is False)
+    svc.auto_store = True
+    check("設定は保存される", AccountService(vault).auto_store is True)
+
+    check("保存が無いアカウントが対象 (セッション未保存は除く)",
+          {x.label for x in svc.store_stale_accounts(now)} == {"a", "b"})
+    fresh = {"saved_at": now, "daily": [StoreItem(name="x").__dict__], "daily_ends_at": now + 3600}
+    svc.store_store.update(a.id, lambda d: d.update(fresh))
+    check("今日のストアがある分は対象外", {x.label for x in svc.store_stale_accounts(now)} == {"b"})
+    check("入れ替わり済みなら対象", {x.label for x in svc.store_stale_accounts(now + 7200)} == {"a", "b"})
+
+    saved_mock, saved_running = process.mock_mode, process.running
+    process.mock_mode = lambda: False
+    try:
+        process.running = lambda *a, **k: []
+        check("止まっていて、取るものがあれば始めてよい", svc.auto_store_due(now))
+        process.running = lambda *a, **k: ["Riot Client.exe"]
+        check("Riot Client が動いていたら始めない", not svc.auto_store_due(now))
+        process.running = lambda *a, **k: ["VALORANT-Win64-Shipping.exe"]
+        check("ゲームが動いていたら始めない", not svc.auto_store_due(now))
+        process.running = lambda *a, **k: []
+        svc.mark_auto_store_run(now - 3600)
+        check("1 時間前に試したばかりなら始めない", not svc.auto_store_due(now))
+        svc.mark_auto_store_run(now - 7 * 3600)
+        check("6 時間以上あいたらまた試す", svc.auto_store_due(now))
+        svc.auto_store = False
+        check("設定が切なら始めない", not svc.auto_store_due(now))
+        svc.auto_store = True
+        for acc in (a, b):
+            svc.store_store.update(acc.id, lambda d: d.update(fresh))
+        check("取るものが無ければ始めない", not svc.auto_store_due(now))
+    finally:
+        process.mock_mode, process.running = saved_mock, saved_running
+    check("モック環境では動かない", not svc.auto_store_due(now))
+
+    # ---- 入れ替え更新: ストアだけを指定でき、画面は最小化される
+    started = []
+    saved_keep = windows.keep_minimized
+    windows.keep_minimized = lambda stop, *a, **k: started.append(stop) or None
+    saved_mock = process.mock_mode
+    process.mock_mode = lambda: False
+    seen_steps = []
+    saved_inner = svc._run_refresh_cycle
+    svc._run_refresh_cycle = lambda accounts, progress, cancel, events, steps: seen_steps.append(steps) or {}
+    try:
+        svc.refresh_cycle([a], steps=("store",))
+        check("ストアだけを指定して回せる", seen_steps == [("store",)], str(seen_steps))
+        check("回している間は画面を最小化し続け、終わったら止める", len(started) == 1 and started[0].is_set())
+        svc.refresh_cycle([a], hide_windows=False)
+        check("画面を最小化しない指定もできる", len(started) == 1)
+    finally:
+        windows.keep_minimized = saved_keep
+        process.mock_mode = saved_mock
+        svc._run_refresh_cycle = saved_inner
+
+    # ---- 設定画面
+    from PySide6.QtWidgets import QApplication
+    from vam.ui.dialogs import SettingsDialog
+    QApplication.instance() or QApplication([])
+    dlg = SettingsDialog(webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+                         henrik_api_key="", current_version="0", vault=vault, auto_store=True)
+    check("設定画面に自動取得のチェックがあり、現在の値が入る",
+          dlg.auto_store_enabled() is True and "store" in dlg.sections)
+    dlg.auto_store.setChecked(False)
+    check("チェックを外せる", dlg.auto_store_enabled() is False)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -2056,7 +2161,7 @@ def test_ui() -> None:
         # 設定画面: 項目ごとのプルダウン + スクロール
         check("項目は既定で閉じている",
               all(not box.is_expanded() for box in settings1.sections.values()), str(settings1.sections.keys()))
-        check("項目は 5 つ (通知・ログイン・検索・パスワード・更新)", len(settings1.sections) == 5)
+        check("項目は 6 つ (通知・ログイン・ストア自動取得・検索・パスワード・更新)", len(settings1.sections) == 6)
         box = settings1.sections["login"]
         box.header.click()
         check("見出しを押すと開く", box.is_expanded() and "▾" in box.header.text())
@@ -2110,7 +2215,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_switch_with_linked_data,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()
