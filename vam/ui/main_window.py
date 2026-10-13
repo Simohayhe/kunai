@@ -499,7 +499,7 @@ class MainWindow(QMainWindow):
             return
         remain = "残り " + format_remaining(left)
         end = time.strftime("%m/%d %H:%M", time.localtime(status["end"]))
-        self.act_label.setText(f"{status['name']}　{remain}（{end} 終了予定）")
+        self.act_label.setText(f"{status['name']}　{remain}")
         self.act_label.setToolTip(
             f"コンペ {status['name']} の終了予定: {end}\n"
             "(Riot の公開データによる予定です。実際の切り替わりは前後することがあります)"
