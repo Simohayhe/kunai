@@ -1799,6 +1799,82 @@ def test_langpack() -> None:
         QMessageBox.warning = saved_warn
 
 
+def test_riot_data_links() -> None:
+    section("Riot Client のデータフォルダがリンク (ジャンクション) のとき")
+    import os
+    import subprocess
+    from vam import diagnostics, paths
+    from vam.riot import session
+
+    base = Path(tempfile.mkdtemp())
+    riot = base / "local" / "Riot Games" / "Riot Client"
+    real = base / "elsewhere" / "RiotData"
+    riot.mkdir(parents=True)
+    real.mkdir(parents=True)
+    result = subprocess.run(["cmd", "/c", "mklink", "/J", str(riot / "Data"), str(real)],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        check("ジャンクションを作れない環境ではスキップ", True)
+        return
+    yaml = "riot-login: {}"
+    (real / "RiotGamesPrivateSettings.yaml").write_text(yaml, encoding="utf-8")
+
+    saved_env = os.environ.get(paths.ENV_OVERRIDE_LOCALAPPDATA)
+    os.environ[paths.ENV_OVERRIDE_LOCALAPPDATA] = str(base / "local")
+    try:
+        link = riot / "Data"
+        check("リンクの実体を引ける", paths.follow_reparse(link) == real, str(paths.follow_reparse(link)))
+        check("普通のフォルダはそのまま", paths.follow_reparse(real) == real)
+        check("無いパスもそのまま", paths.follow_reparse(base / "none") == base / "none")
+        target = paths.riot_file("Data/RiotGamesPrivateSettings.yaml")
+        check("ファイルは実体のパスで指す", target == real / "RiotGamesPrivateSettings.yaml", str(target))
+        check("セッションファイルを見つける",
+              [p.name for p in paths.session_files()] == ["RiotGamesPrivateSettings.yaml"])
+        check("読み出せる", "Data/RiotGamesPrivateSettings.yaml" in session.capture())
+
+        written = session.restore({"Data/RiotGamesPrivateSettings.yaml": b"restored"})
+        check("書き戻せる (実体に書く)",
+              written and (real / "RiotGamesPrivateSettings.yaml").read_bytes() == b"restored")
+        session.clear_current()
+        check("消せる", not (real / "RiotGamesPrivateSettings.yaml").exists())
+        check("診断にリンクが出る", "Data→" in diagnostics._link_report(), diagnostics._link_report())
+
+        # mkdir が 448 で失敗しても、書き込めれば続行する (実機の症状)
+        saved_mkdir = Path.mkdir
+
+        def bad_mkdir(self, *a, **k):
+            raise OSError(448, "信頼されていないマウントポイント")
+        Path.mkdir = bad_mkdir
+        try:
+            session.restore({"Data/RiotGamesPrivateSettings.yaml": b"again"})
+            check("フォルダ作成が 448 で失敗しても書き戻せる",
+                  (real / "RiotGamesPrivateSettings.yaml").read_bytes() == b"again")
+        finally:
+            Path.mkdir = saved_mkdir
+
+        # 書き込みが 448 で失敗したら、案内つきの SessionError にする
+        saved_write = Path.write_bytes
+
+        def bad_write(self, data):
+            err = OSError(448, "信頼されていないマウントポイント")
+            err.winerror = 448
+            raise err
+        Path.write_bytes = bad_write
+        try:
+            session.restore({"Data/RiotGamesPrivateSettings.yaml": b"x"})
+            check("書き込み失敗は案内つきで知らせる", False, "例外が出なかった")
+        except session.SessionError as exc:
+            check("書き込み失敗は案内つきで知らせる", "リンク" in str(exc) and "448" in str(exc), str(exc))
+        finally:
+            Path.write_bytes = saved_write
+    finally:
+        if saved_env is None:
+            os.environ.pop(paths.ENV_OVERRIDE_LOCALAPPDATA, None)
+        else:
+            os.environ[paths.ENV_OVERRIDE_LOCALAPPDATA] = saved_env
+        subprocess.run(["cmd", "/c", "rmdir", str(riot / "Data")], capture_output=True)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -2078,7 +2154,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_langpack,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_langpack, test_riot_data_links,
                test_status_notify, test_ui):
         try:
             fn()

@@ -325,14 +325,28 @@ def _rewrite_block(lines: list[str], start: int, end: int,
                 lines[j] = f"{m.group('head')}{int(expiry)}{newline}"
 
 
+def _link_hint(exc: OSError, path: Path) -> str:
+    """Riot Client のフォルダを読み書きできなかったときの案内。"""
+    message = f"Riot Client のデータを読み書きできませんでした ({path}): {exc}"
+    if getattr(exc, "winerror", None) == 448:
+        message += (
+            "\nこのフォルダはリンク (ジャンクション等) になっていて、Windows に"
+            "「信頼されていない」と判断されています。リンクではなく通常のフォルダにするか、"
+            "リンクを管理者が作り直してください。"
+        )
+    return message
+
+
 def capture() -> dict[str, bytes]:
     """今 Riot Client に入っているセッションを読み出す。"""
-    root = paths.riot_client_data_root()
     blobs: dict[str, bytes] = {}
     for rel in paths.SESSION_FILE_CANDIDATES:
-        f = root / rel
+        f = paths.riot_file(rel)
         if paths.safe_is_file(f):
-            blobs[rel] = f.read_bytes()
+            try:
+                blobs[rel] = f.read_bytes()
+            except OSError as exc:
+                raise SessionError(_link_hint(exc, f)) from exc
     if not blobs:
         raise SessionError(
             "セッションファイルが見つかりません。"
@@ -357,27 +371,34 @@ def restore(blobs: dict[str, bytes], backup_dir: Path | None = None) -> list[str
     if not blobs:
         raise SessionError("保存されたセッションがありません")
 
-    root = paths.riot_client_data_root()
     written: list[str] = []
     for rel, data in blobs.items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if backup_dir and paths.safe_is_file(target):
-            b = backup_dir / rel.replace("/", "@@")
-            b.parent.mkdir(parents=True, exist_ok=True)
-            b.write_bytes(target.read_bytes())
-        target.write_bytes(data)
+        target = paths.riot_file(rel)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # 既にある (リンク越しで判定できないだけ) こともあるので、書き込めるかで確かめる
+        try:
+            if backup_dir and paths.safe_is_file(target):
+                b = backup_dir / rel.replace("/", "@@")
+                b.parent.mkdir(parents=True, exist_ok=True)
+                b.write_bytes(target.read_bytes())
+            target.write_bytes(data)
+        except OSError as exc:
+            raise SessionError(_link_hint(exc, target)) from exc
         written.append(rel)
     return written
 
 
 def clear_current() -> list[str]:
     """今のログイン状態を消す。ログアウト相当。"""
-    root = paths.riot_client_data_root()
     removed = []
     for rel in paths.SESSION_FILE_CANDIDATES:
-        f = root / rel
+        f = paths.riot_file(rel)
         if paths.safe_is_file(f):
-            f.unlink()
+            try:
+                f.unlink()
+            except OSError as exc:
+                raise SessionError(_link_hint(exc, f)) from exc
             removed.append(rel)
     return removed

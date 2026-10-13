@@ -49,6 +49,27 @@ def write_crash(exc_type, exc_value, exc_tb) -> Path | None:
         return None
 
 
+def _safe_is_dir(path) -> object:
+    try:
+        return path.is_dir()
+    except OSError as exc:
+        return f"判定不能 ({exc})"
+
+
+def _link_report() -> str:
+    """Riot Client の置き場の途中にリンク (ジャンクション等) があるか。"""
+    import os
+    root = paths.local_appdata() / "Riot Games" / "Riot Client"
+    found = []
+    for p in (root.parent, root, root / "Data", root / "Config", root / "Beta"):
+        try:
+            if getattr(os.lstat(p), "st_file_attributes", 0) & 0x400:
+                found.append(f"{p.name}→{os.readlink(p)}")
+        except OSError:
+            continue
+    return ", ".join(found) or "なし"
+
+
 def environment_report() -> str:
     """不具合報告に貼れる環境情報。個人を特定する値は入れない。"""
     env = paths.detect()
@@ -65,7 +86,8 @@ def environment_report() -> str:
         f"OS                : {platform.platform()}",
         f"Riot Client       : {env.client_exe or '見つからない'}",
         f"データ置き場      : {env.data_root}",
-        f"データ置き場の有無: {env.data_root.is_dir()}",
+        f"データ置き場の有無: {_safe_is_dir(env.data_root)}",
+        f"リンク (Data 等)  : {_link_report()}",
         f"セッションファイル: {[p.name for p in env.found_session_files] or 'なし'}",
         f"lockfile          : {'あり' if env.lockfile else 'なし'}",
         f"起動中プロセス    : {running}",

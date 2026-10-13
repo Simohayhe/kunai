@@ -54,9 +54,47 @@ def local_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
 
 
+_REPARSE_POINT = 0x400   # FILE_ATTRIBUTE_REPARSE_POINT (junction / シンボリックリンク)
+
+
+def follow_reparse(path: Path) -> Path:
+    """path がジャンクション / シンボリックリンクなら、その実体のパスを返す。
+
+    実機で報告された不具合: Riot Client の置き場の途中にあるリンクを辿ると、
+    Windows が「信頼されていないマウントポイント」(WinError 448) で拒否して、
+    その先のフォルダ作成・読み書きが失敗した。リンク自体を調べる (lstat) のは
+    拒否されないので、リンクの行き先 (実体) を直接使って、リンクを通らないようにする。
+    辿れなければ元のパスをそのまま返す。
+    """
+    try:
+        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+        if attrs & _REPARSE_POINT:
+            target = os.readlink(path)
+            if target.startswith("\\\\?\\"):
+                target = target[4:]
+            resolved = Path(target)
+            return resolved if resolved.is_absolute() else path.parent / resolved
+    except (OSError, ValueError):
+        pass
+    return path
+
+
+def resolve_links(base: Path, *parts: str) -> Path:
+    """base から parts を順に辿る。途中のリンクは、その実体に置き換えながら進む。"""
+    current = follow_reparse(base)
+    for part in parts:
+        current = follow_reparse(current / part)
+    return current
+
+
 def riot_client_data_root() -> Path:
-    r"""%LOCALAPPDATA%\Riot Games\Riot Client"""
-    return local_appdata() / "Riot Games" / "Riot Client"
+    r"""%LOCALAPPDATA%\Riot Games\Riot Client (途中にリンクがあれば実体のパス)"""
+    return resolve_links(local_appdata(), "Riot Games", "Riot Client")
+
+
+def riot_file(rel: str) -> Path:
+    """Riot Client の置き場の中のファイル。Data / Config などがリンクでも実体を指す。"""
+    return resolve_links(riot_client_data_root(), *rel.split("/"))
 
 
 def valorant_log_dir() -> Path:
@@ -65,14 +103,12 @@ def valorant_log_dir() -> Path:
 
 def session_files() -> list[Path]:
     """現在存在するセッション関連ファイルの実パス一覧。"""
-    root = riot_client_data_root()
-    return [root / rel for rel in SESSION_FILE_CANDIDATES if safe_is_file(root / rel)]
+    return [riot_file(rel) for rel in SESSION_FILE_CANDIDATES if safe_is_file(riot_file(rel))]
 
 
 def lockfile_path() -> Path | None:
-    root = riot_client_data_root()
     for rel in LOCKFILE_CANDIDATES:
-        p = root / rel
+        p = riot_file(rel)
         if safe_is_file(p):
             return p
     return None
