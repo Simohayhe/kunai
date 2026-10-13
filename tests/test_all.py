@@ -1307,6 +1307,40 @@ def test_act_status() -> None:
     svc.content.acts = boom
     check("取得できなければ None", svc.act_status(now=6000.0) is None)
 
+    from vam.ui.main_window import format_remaining
+    check("1 日以上は D 表記", format_remaining(3 * 86400 + 5000) == "3D")
+    check("ちょうど 1 日も D で統一", format_remaining(86400) == "1D")
+    check("1 日を切ったら h 表記", format_remaining(86400 - 1) == "23h")
+    check("数時間", format_remaining(5 * 3600 + 10) == "5h")
+    check("1 時間を切ったら <1h", format_remaining(3599) == "<1h" and format_remaining(0) == "<1h")
+
+
+def test_browser_open() -> None:
+    section("Riot アカウントページを開く")
+    from vam import browser
+
+    fake_exe = Path(tempfile.mkdtemp()) / "chrome.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    popen_calls, web_calls = [], []
+    saved = (browser._candidates, browser.subprocess.Popen, browser.webbrowser.open)
+    browser.subprocess.Popen = lambda args, **k: popen_calls.append(args)
+    browser.webbrowser.open = lambda url: web_calls.append(url)
+    try:
+        browser._candidates = lambda: [("Chrome", fake_exe, "--incognito")]
+        how = browser.open_private()
+        check("Chrome があればシークレットで開く",
+              popen_calls and popen_calls[0][1:] == ["--incognito", browser.ACCOUNT_PAGE_URL], str(popen_calls))
+        check("開き方を返す", "シークレット" in how, how)
+        check("普通のブラウザは使わない", not web_calls)
+
+        popen_calls.clear()
+        browser._candidates = lambda: [("Edge", fake_exe.parent / "none.exe", "--inprivate")]
+        how = browser.open_private()
+        check("見つからなければ既定のブラウザ", web_calls == [browser.ACCOUNT_PAGE_URL] and "既定" in how, how)
+        check("URL は Riot のアカウントページ", browser.ACCOUNT_PAGE_URL.startswith("https://account.riotgames.com"))
+    finally:
+        browser._candidates, browser.subprocess.Popen, browser.webbrowser.open = saved
+
 
 def test_status_notify() -> None:
     section("障害通知")
@@ -1573,7 +1607,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open,
                test_status_notify, test_ui):
         try:
             fn()

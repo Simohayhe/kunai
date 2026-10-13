@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import diagnostics, updater
+from .. import browser, diagnostics, updater
 from ..models import Account
 from ..riot import process as riot_process
 from ..service import STEP_LABELS, AccountService
@@ -29,6 +29,17 @@ from .refresh_progress import RefreshProgressBar
 
 STATUS_CHECK_INTERVAL_MS = 120_000
 ACCOUNT_AUTO_REFRESH_INTERVAL_MS = 180_000
+
+
+
+def format_remaining(seconds: float) -> str:
+    """残り時間を短い表記にする。1 日以上は「3D」、1 日を切ったら「18h」、
+    1 時間を切ったら「<1h」。"""
+    if seconds >= 86400:
+        return f"{int(seconds // 86400)}D"
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    return "<1h"
 
 
 class MainWindow(QMainWindow):
@@ -486,14 +497,9 @@ class MainWindow(QMainWindow):
             # 起動したまま次のアクトに入った。情報を取り直す (普通はキャッシュ読みで済む)
             self.update_act_countdown()
             return
-        if left >= 86400:
-            remain = f"あと {int(left // 86400)} 日"
-        elif left >= 3600:
-            remain = f"あと {int(left // 3600)} 時間"
-        else:
-            remain = "まもなく終了"
+        remain = "残り " + format_remaining(left)
         end = time.strftime("%m/%d %H:%M", time.localtime(status["end"]))
-        self.act_label.setText(f"{status['name']}　{remain}")
+        self.act_label.setText(f"{status['name']}　{remain}（{end} 終了予定）")
         self.act_label.setToolTip(
             f"コンペ {status['name']} の終了予定: {end}\n"
             "(Riot の公開データによる予定です。実際の切り替わりは前後することがあります)"
@@ -1402,10 +1408,30 @@ class MainWindow(QMainWindow):
             menu.addAction("パスワードをコピー",
                            lambda: self._copy(account.password, "パスワードをコピーしました"))
         menu.addSeparator()
+        page = menu.addAction("Riot アカウントページを開く (Riot ID の変更など)",
+                              lambda: self.open_riot_account_page(account_id))
+        page.setToolTip("ユーザー名をコピーして、シークレットウィンドウでアカウントページを開きます")
+        menu.addSeparator()
         menu.addAction("編集", lambda: self.edit_account(account_id))
         delete = menu.addAction("削除", lambda: self.delete_account(account_id))
         delete.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_TrashIcon))
         return menu
+
+    def open_riot_account_page(self, account_id: str) -> None:
+        """Riot ID の変更などをするアカウントページを、アカウントごとに開く。
+        ユーザー名をクリップボードに入れ、シークレットウィンドウで開く
+        (ブラウザに別のアカウントのログインが残っていても混ざらない)。
+        パスワードは「パスワードをコピー」で、ログイン画面に貼り付ける。"""
+        account = self.vault.get(account_id)
+        if not account:
+            return
+        if account.username:
+            self._copy(account.username)
+        how = browser.open_private()
+        hint = "ユーザー名をコピーしました。" if account.username else ""
+        self.status.showMessage(
+            f"{account.display_name}: {how}でアカウントページを開きました。{hint}"
+            "ログインして Riot ID を変更してください", 8000)
 
     def show_diagnostics(self) -> None:
         """環境情報を出す。不具合報告のときにそのまま貼れる。"""
