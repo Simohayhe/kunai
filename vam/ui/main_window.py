@@ -363,6 +363,8 @@ class MainWindow(QMainWindow):
 
         self.detail = DetailPanel()
         self.detail.history.icons = self.icons
+        self.detail.store.icons = self.icons
+        self.detail.store.reload_requested.connect(lambda: self.load_store(force=True))
         self.detail.history.reload_requested.connect(self.load_history)
         self.detail.history.match_clicked.connect(self.open_match_detail)
         self.detail.inventory.reload_requested.connect(self.load_inventory)
@@ -590,6 +592,7 @@ class MainWindow(QMainWindow):
         if is_new_selection:
             self.load_history()
             self._show_inventory(account)
+            self.load_store()
 
         can_switch = (info.valid and not info.expired) or bool(
             account.username and account.password
@@ -1332,6 +1335,38 @@ class MainWindow(QMainWindow):
             agent_icons = {}
         self.detail.history.set_matches(stats.matches, maps, self.service.content.tier_names(),
                                         agent_icons)
+
+    # -- ストア -------------------------------------------------------------
+    def load_store(self, force: bool = False) -> None:
+        """保存済みのストアをまず出し、無い/入れ替わり済み/更新ボタンのときだけ取りに行く。"""
+        account = self.vault.get(self.selected_id) if self.selected_id else None
+        if not account:
+            return
+        saved = self.service.saved_store(account)
+        if saved:
+            self.detail.store.set_store(saved)
+        else:
+            self.detail.store.set_message("読み込み中…")
+        if saved and not force and not saved.expired():
+            return
+        workers.run(
+            self.service.store, account,
+            on_done=lambda data: self._on_store(account.id, data),
+            on_error=lambda m: self._on_store_failed(account.id, m, bool(saved)),
+            on_progress=self.status.showMessage,
+        )
+
+    def _on_store(self, account_id: str, data) -> None:
+        if self.selected_id == account_id:
+            self.detail.store.set_store(data)
+
+    def _on_store_failed(self, account_id: str, message: str, has_saved: bool) -> None:
+        if self.selected_id != account_id or has_saved:
+            return  # 保存済みを表示中なら、エラー画面で潰さない
+        self.detail.store.set_message(
+            f"ストアを取得できませんでした。\n{message}\n"
+            "(ストアは、そのアカウントでログインしているときに取得できます。"
+            "「すべて更新」でも取得して保存します)")
 
     def _on_history_failed(self, account_id: str, message: str) -> None:
         if self.selected_id != account_id:

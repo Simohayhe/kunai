@@ -592,12 +592,178 @@ class InventoryTab(QWidget):
         return row
 
 
+def _short_remaining(seconds: float) -> str:
+    if seconds >= 86400:
+        return f"{int(seconds // 86400)}D"
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    return "<1h" if seconds > 0 else "0"
+
+
+class StoreTab(QWidget):
+    """今日のストア (日替わり・ナイトマーケット・バンドル)。"""
+    reload_requested = Signal()
+    icons = None   # MainWindow が渡す (未設定ならアイコン無し)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 16, 0, 0)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        title = QLabel("ストア")
+        title.setObjectName("SectionTitle")
+        top.addWidget(title)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("SubTitle")
+        top.addWidget(self.status_label)
+        top.addStretch(1)
+        self.reload = QPushButton("更新")
+        self.reload.clicked.connect(self.reload_requested.emit)
+        top.addWidget(self.reload)
+        layout.addLayout(top)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.container = QWidget()
+        self.rows = QVBoxLayout(self.container)
+        self.rows.setSpacing(6)
+        self.rows.setContentsMargins(0, 0, 6, 0)
+        self.rows.addStretch(1)
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll, 1)
+
+    def clear(self) -> None:
+        while self.rows.count() > 1:
+            item = self.rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def set_message(self, text: str) -> None:
+        self.clear()
+        self.status_label.setText("")
+        msg = QLabel(text)
+        msg.setObjectName("SubTitle")
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
+        self.rows.insertWidget(0, msg)
+
+    def set_store(self, data) -> None:
+        self.clear()
+        now = time.time()
+        saved = time.strftime("%m/%d %H:%M", time.localtime(data.saved_at)) if data.saved_at else ""
+        if data.expired(now):
+            note = f"保存済み {saved}（日替わりは入れ替わっています）"
+        elif data.fetch_error:
+            note = f"保存済み {saved}（最新は取得できず）"
+        elif data.from_saved:
+            note = f"保存済み {saved}"
+        else:
+            note = f"取得 {saved}"
+        if data.daily_ends_at and not data.expired(now):
+            note += f"  ·  日替わり 残り {_short_remaining(data.daily_ends_at - now)}"
+        self.status_label.setText(f"（{note}）")
+        self.status_label.setToolTip(data.fetch_error or "")
+
+        def header(text: str) -> None:
+            label = QLabel(text)
+            label.setObjectName("SectionTitle")
+            self.rows.insertWidget(self.rows.count() - 1, label)
+
+        def add(widget) -> None:
+            self.rows.insertWidget(self.rows.count() - 1, widget)
+
+        if data.daily:
+            header(f"日替わり ({len(data.daily)})")
+            for item in data.daily:
+                add(self._item_row(item))
+        if data.night:
+            left = _short_remaining(data.night_ends_at - now) if data.night_ends_at else ""
+            header("ナイトマーケット" + (f"  (残り {left})" if left else ""))
+            for item in data.night:
+                add(self._item_row(item))
+        if data.bundles:
+            header("バンドル")
+            for bundle in data.bundles:
+                add(self._bundle_row(bundle, now))
+        if not (data.daily or data.night or data.bundles):
+            self.set_message("ストアの情報がありません")
+
+    def _icon(self, url, size: int) -> QLabel:
+        icon = QLabel()
+        icon.setFixedSize(size * 2, size)
+        icon.setAlignment(Qt.AlignCenter)
+        if self.icons is not None:
+            self.icons.attach(icon, url, size)
+        return icon
+
+    def _frame(self, color: str) -> tuple[QFrame, QHBoxLayout]:
+        row = QFrame()
+        row.setStyleSheet(
+            f"QFrame {{ background:{theme.BG_CARD}; border:1px solid {theme.BORDER};"
+            f" border-left:3px solid {color}; border-radius:4px; }} QLabel {{ border:none; }}"
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 7, 12, 7)
+        layout.setSpacing(12)
+        return row, layout
+
+    def _item_row(self, item) -> QFrame:
+        row, layout = self._frame(item.tier_color)
+        layout.addWidget(self._icon(item.icon, 44))
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        name = QLabel(item.name)
+        name.setStyleSheet("font-size:13px; font-weight:600;")
+        col.addWidget(name)
+        if item.tier_name:
+            tier = QLabel(f"●  {item.tier_name}")
+            tier.setStyleSheet(f"color:{item.tier_color}; font-size:11px;")
+            col.addWidget(tier)
+        layout.addLayout(col, 1)
+        price = QVBoxLayout()
+        price.setSpacing(0)
+        price.setAlignment(Qt.AlignRight)
+        now_cost = QLabel(f"{item.cost:,} VP" if item.cost else "—")
+        now_cost.setAlignment(Qt.AlignRight)
+        now_cost.setStyleSheet("font-size:13px; font-weight:700;")
+        price.addWidget(now_cost)
+        if item.discount_percent and item.base_cost > item.cost:
+            was = QLabel(f"{item.base_cost:,} VP  (-{item.discount_percent}%)")
+            was.setAlignment(Qt.AlignRight)
+            was.setStyleSheet(f"color:{theme.OK}; font-size:10px;")
+            price.addWidget(was)
+        layout.addLayout(price)
+        return row
+
+    def _bundle_row(self, bundle, now: float) -> QFrame:
+        row, layout = self._frame(theme.ACCENT)
+        layout.addWidget(self._icon(bundle.icon, 44))
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        name = QLabel(bundle.name)
+        name.setStyleSheet("font-size:13px; font-weight:600;")
+        col.addWidget(name)
+        if bundle.ends_at > now:
+            left = QLabel(f"残り {_short_remaining(bundle.ends_at - now)}")
+            left.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
+            col.addWidget(left)
+        layout.addLayout(col, 1)
+        price = QLabel(f"{bundle.cost:,} VP" if bundle.cost else "—")
+        price.setStyleSheet("font-size:13px; font-weight:700;")
+        layout.addWidget(price)
+        return row
+
+
 class DetailPanel(QTabWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.overview = OverviewTab()
         self.history = HistoryTab()
         self.inventory = InventoryTab()
+        self.store = StoreTab()
         self.addTab(self.overview, "概要")
         self.addTab(self.history, "戦績")
         self.addTab(self.inventory, "所持品")
+        self.addTab(self.store, "ストア")

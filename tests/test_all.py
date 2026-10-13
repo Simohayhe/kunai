@@ -1039,6 +1039,10 @@ def test_bulk_refresh() -> None:
                 raise api.ApiError(FakeClient.ent_error)
             return [f"{kind}-1", f"{kind}-2"]
 
+        def storefront(self, puuid=None):
+            return {"SkinsPanelLayout": {"SingleItemOffers": ["lv1"],
+                                         "SingleItemOffersRemainingDurationInSeconds": 3600}}
+
     auth_calls = {"n": 0, "fail": False}
 
     def fake_authenticate(account):
@@ -1124,11 +1128,11 @@ def test_bulk_refresh() -> None:
         acc3 = Account(label="bulk3", puuid="puuid1", region="ap", session_saved=True)
         vault.add(acc3)
         report = svc.refresh_account(acc3)
-        check("3 つとも失敗なら保留", report.held and len(report.errors) == 3,
+        check("ランク・戦績・スキンが全部失敗なら保留", report.held and len(report.errors) == 4,
               str(report.errors))
         check("認証失敗は 1 回だけ試す", auth_calls["n"] == 1, str(auth_calls["n"]))
         check("理由が各ステップに入る",
-              all(report.errors.get(k) for k in ("rank", "history", "skins")))
+              all(report.errors.get(k) for k in ("rank", "history", "skins", "store")))
 
         # 6. まとめて: 失敗が混ざっても全員分回る
         auth_calls.update(n=0, fail=False)
@@ -1181,6 +1185,7 @@ def test_refresh_cycle() -> None:
     svc._refresh_rank = lambda *a, **k: None
     svc._refresh_history = lambda *a, **k: None
     svc._refresh_skins = lambda *a, **k: None
+    svc._refresh_store = lambda *a, **k: None
     svc.switch = fake_switch
     svc.refresh_account = fake_refresh
     svc.current_account = lambda: orig_acc
@@ -1223,8 +1228,8 @@ def test_refresh_cycle() -> None:
         kinds = [e["kind"] for e in events]
         check("進捗: start→account→client", kinds[:3] == ["start", "account", "client"], str(kinds))
         check("進捗: 件数と名前が入る", events[0]["total"] == 1 and events[1]["name"] == "a")
-        check("進捗: 3 ステップ分", [e["step"] for e in events if e["kind"] == "step"
-              and e["state"] == "running"] == ["rank", "history", "skins"])
+        check("進捗: 4 ステップ分", [e["step"] for e in events if e["kind"] == "step"
+              and e["state"] == "running"] == ["rank", "history", "skins", "store"])
         check("進捗: 完了と復元", "account_done" in kinds and kinds[-1] == "restoring")
     finally:
         process.game_running, process.stop_all = saved
@@ -1665,6 +1670,167 @@ def test_switch_with_linked_data() -> None:
     subprocess.run(["cmd", "/c", "rmdir", str(data)], capture_output=True)
 
 
+def test_store() -> None:
+    section("ストア (日替わり・ナイトマーケット・バンドル)")
+    import time as _time
+    from vam.models import Account
+    from vam.riot import api, auth
+    from vam.service import (
+        VP_CURRENCY_ID, AccountService, ServiceError, StoreData, StoreItem,
+    )
+    from vam.storage import Vault
+
+    # ---- API: v3 (POST) を先に、だめなら v2 (GET)
+    calls = []
+
+    class Fake(api.ValorantApi):
+        def __init__(self, v3, v2):
+            super().__init__(auth.AuthResult(access_token="t", puuid="me"), region="ap")
+            self.v3, self.v2 = v3, v2
+
+        def _request(self, method, url, **kw):
+            calls.append((method, url.split(".net")[-1]))
+            if isinstance(self.v3, Exception):
+                raise self.v3
+            return self.v3
+
+        def _get(self, path):
+            calls.append(("GET", path))
+            return self.v2
+
+    check("v3 が使えればそれを使う", Fake({"x": 1}, None).storefront() == {"x": 1}
+          and calls[0][0] == "POST" and calls[0][1] == "/store/v3/storefront/me", str(calls))
+    calls.clear()
+    check("v3 が拒否されたら v2 に落ちる",
+          Fake(api.ApiError("405"), {"y": 2}).storefront() == {"y": 2}
+          and [c[0] for c in calls] == ["POST", "GET"], str(calls))
+    calls.clear()
+    check("v3 が 404 (None) でも v2 に落ちる", Fake(None, {"z": 3}).storefront() == {"z": 3})
+    try:
+        Fake(None, None).storefront()
+        check("どちらも無ければ ApiError", False, "例外が出なかった")
+    except api.ApiError:
+        check("どちらも無ければ ApiError", True)
+
+    # ---- 応答 -> 表示用データ
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    svc.content.weapons = lambda: {"w1": {"name": "ヴァンダル", "icon": "", "category": "", "skins": {
+        "s1": {"name": "プライム ヴァンダル", "tier": "t-prem", "icon": "https://x/s1.png", "levels": ["lv1", "lv1b"]},
+        "s2": {"name": "リーヴァー ヴァンダル", "tier": "t-ult", "icon": None, "levels": ["lv2"]}}}}
+    svc.content.content_tiers = lambda: {"t-prem": {"name": "プレミアム", "color": "#d1548d", "rank": 2},
+                                         "t-ult": {"name": "アルティメット", "color": "#fad663", "rank": 4}}
+    svc.content.bundles = lambda: {"b1": {"name": "春のバンドル", "icon": "https://x/b1.png"}}
+    raw = {
+        "SkinsPanelLayout": {
+            "SingleItemOffers": ["lv1", "lv2", "unknown"],
+            "SingleItemStoreOffers": [{"OfferID": "lv1", "Cost": {VP_CURRENCY_ID: 1775}},
+                                      {"OfferID": "lv2", "Cost": {VP_CURRENCY_ID: 2475}}],
+            "SingleItemOffersRemainingDurationInSeconds": 7200},
+        "BonusStore": {"BonusStoreOffers": [{
+            "Offer": {"OfferID": "o", "Cost": {VP_CURRENCY_ID: 2000}, "Rewards": [{"ItemID": "lv1"}]},
+            "DiscountPercent": 30, "DiscountCosts": {VP_CURRENCY_ID: 1400}}],
+            "BonusStoreRemainingDurationInSeconds": 86400},
+        "FeaturedBundle": {"Bundles": [{"DataAssetID": "b1", "DurationRemainingInSeconds": 1000,
+                                        "TotalBaseCost": {VP_CURRENCY_ID: 8000},
+                                        "TotalDiscountedCost": {VP_CURRENCY_ID: 6000}}]},
+    }
+    data = svc._build_store(raw)
+    check("日替わりの商品が名前・価格・エディションつきで入る",
+          [(i.name, i.cost, i.tier_name) for i in data.daily[:2]]
+          == [("プライム ヴァンダル", 1775, "プレミアム"), ("リーヴァー ヴァンダル", 2475, "アルティメット")],
+          str(data.daily))
+    check("画像とエディションの色", data.daily[0].icon == "https://x/s1.png" and data.daily[0].tier_color == "#d1548d")
+    check("不明な商品でも落ちない", data.daily[2].name == "不明なスキン")
+    check("入れ替わり時刻 (残り 2 時間)", 7100 < data.daily_ends_at - _time.time() < 7300)
+    check("ナイトマーケットは割引後の価格と割引率",
+          data.night[0].cost == 1400 and data.night[0].base_cost == 2000 and data.night[0].discount_percent == 30
+          and data.night[0].name == "プライム ヴァンダル", str(data.night))
+    check("バンドルの名前・価格・割引率",
+          data.bundles[0].name == "春のバンドル" and data.bundles[0].cost == 6000
+          and data.bundles[0].discount_percent == 25, str(data.bundles))
+    check("空の応答でも落ちない", svc._build_store({}).daily == [])
+
+    # ---- 取得して保存・読み出し・失敗時のフォールバック
+    acc = Account(label="shop", puuid="me", region="ap", session_saved=True)
+    vault.add(acc)
+    state = {"fail": False, "calls": 0}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def storefront(self, puuid=None):
+            state["calls"] += 1
+            if state["fail"]:
+                raise api.ApiError("ストアが 500")
+            return raw
+
+    saved = (api.ValorantApi, svc.authenticate)
+    api.ValorantApi = Client
+    svc.authenticate = lambda account: auth.AuthResult(access_token="t", puuid="me", region="ap")
+    try:
+        check("保存前は無い", svc.saved_store(acc) is None)
+        got = svc.store(acc)
+        check("取得できる", len(got.daily) == 3 and not got.from_saved and got.fetch_error == "")
+        check("アカウントごとの JSON ができる", svc.store_store.path_for(acc.id).is_file())
+        again = svc.saved_store(acc)
+        check("保存した内容を通信せずに読める",
+              again.from_saved and [i.name for i in again.daily] == [i.name for i in got.daily]
+              and again.night[0].cost == 1400 and again.bundles[0].name == "春のバンドル")
+        check("再起動後 (別インスタンス) でも読める", AccountService(vault).saved_store(acc) is not None)
+
+        state["fail"] = True
+        offline = svc.store(acc)
+        check("取得失敗でも保存済みを返す", offline.from_saved and "ストアが 500" in offline.fetch_error,
+              offline.fetch_error)
+        other = Account(label="never", puuid="p2", region="ap", session_saved=True)
+        vault.add(other)
+        try:
+            svc.store(other)
+            check("保存も無ければ例外", False, "例外が出なかった")
+        except Exception:
+            check("保存も無ければ例外", True)
+
+        # 入れ替わり判定
+        check("入れ替わり前は期限切れでない", not StoreData(daily_ends_at=_time.time() + 60).expired())
+        check("入れ替わり後は期限切れ", StoreData(daily_ends_at=_time.time() - 60).expired())
+        check("時刻不明は期限切れ扱いにしない", not StoreData().expired())
+
+        # 一括更新: ストアも取る。ストアだけ失敗しても保留にはしない
+        state["fail"] = False
+        report = svc.refresh_account(acc, steps=("store",))
+        check("一括更新のステップにストアがある", report.ok and state["calls"] >= 3)
+        from vam.service import RefreshReport
+        r = RefreshReport("x", errors={"store": "x"})
+        check("ストアだけ失敗は保留にならない", not r.held)
+        r2 = RefreshReport("x", errors={"rank": "a", "history": "b", "skins": "c"})
+        check("ランク・戦績・スキンが全滅なら保留", r2.held)
+    finally:
+        api.ValorantApi, svc.authenticate = saved
+
+    # ---- 画面
+    from PySide6.QtWidgets import QApplication, QLabel
+    from vam.ui.detail_panel import DetailPanel, StoreTab
+    QApplication.instance() or QApplication([])
+    tab = StoreTab()
+    tab.set_store(data)
+    texts = [w.text() for w in tab.container.findChildren(QLabel)]
+    check("商品名と価格が並ぶ", "プライム ヴァンダル" in texts and "1,775 VP" in texts, str(texts[:6]))
+    check("ナイトマーケットとバンドルの見出し", any("ナイトマーケット" in t for t in texts) and "バンドル" in texts)
+    check("取得時刻と残り時間が出る", "残り 1h" in tab.status_label.text() or "残り 2h" in tab.status_label.text(),
+          tab.status_label.text())
+    old = StoreData(saved_at=_time.time(), daily=[StoreItem(name="a")], daily_ends_at=_time.time() - 10,
+                    from_saved=True)
+    tab.set_store(old)
+    check("入れ替わり後の保存は、その旨を出す", "入れ替わって" in tab.status_label.text(), tab.status_label.text())
+    tab.set_message("メッセージ")
+    check("メッセージ表示", any(w.text() == "メッセージ" for w in tab.container.findChildren(QLabel)))
+    panel = DetailPanel()
+    check("詳細にストアタブがある", panel.tabText(panel.indexOf(panel.store)) == "ストア")
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1944,7 +2110,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_switch_with_linked_data,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()

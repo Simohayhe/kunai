@@ -268,6 +268,25 @@ class ValorantApi:
             ))
         return out
 
+    # -- ストア -------------------------------------------------------------
+    def storefront(self, puuid: str | None = None) -> dict:
+        """そのアカウントの今日のストア (日替わり 4 点・ナイトマーケット・バンドル等)。
+
+        自分のトークンでしか引けない。新しい版 (v3, POST) を先に試し、使えなければ
+        従来の版 (v2, GET) に落とす。どちらも応答の形は同じ (SkinsPanelLayout 等)。
+        """
+        puuid = puuid or self.auth.puuid
+        try:
+            data = self._request("POST", self.pd + f"/store/v3/storefront/{puuid}", json={})
+            if data:
+                return data
+        except ApiError:
+            pass  # v3 が無い / 拒否された。v2 を試す
+        data = self._get(f"/store/v2/storefront/{puuid}")
+        if not data:
+            raise ApiError("ストアの情報を取得できませんでした")
+        return data
+
     def match_details(self, match_id: str) -> dict:
         return self._get(f"/match-details/v1/matches/{match_id}") or {}
 
@@ -350,10 +369,6 @@ class ValorantApi:
             raise ApiError(f"未知の所持品種別: {kind}")
         data = self._get(f"/store/v1/entitlements/{puuid}/{type_id}") or {}
         return [e.get("ItemID", "") for e in data.get("Entitlements", []) if e.get("ItemID")]
-
-    def storefront(self, puuid: str | None = None) -> dict:
-        puuid = puuid or self.auth.puuid
-        return self._request("POST", f"{self.pd}/store/v3/storefront/{puuid}", json={}) or {}
 
     # -- 名前解決 -----------------------------------------------------------
     def names(self, puuids: list[str]) -> dict[str, str]:

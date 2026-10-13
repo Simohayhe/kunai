@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
 from ..service import STEP_LABELS
 from . import theme
 
-# 1 アカウントあたりの目盛り: Riot Client の起動 + 3 ステップ
-_UNITS = 4
-_ORDER = ("client", "rank", "history", "skins")
+# 1 アカウントあたりの目盛り: Riot Client の起動 + 4 ステップ
+_UNITS = 5
+_ORDER = ("client", "rank", "history", "skins", "store")
 _LABELS = {"client": "Riot Client", **STEP_LABELS}
 _MARKS = {"pending": "・", "running": "…", "ok": "✓", "error": "✕", "skipped": "－"}
 _COLORS = {"pending": theme.TEXT_DIM, "running": theme.WARN, "ok": theme.OK,

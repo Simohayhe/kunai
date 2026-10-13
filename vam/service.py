@@ -286,6 +286,49 @@ class MatchStats:
         return (self.wins / self.games * 100) if self.games else 0.0
 
 
+VP_CURRENCY_ID = "85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"   # VALORANT Points
+
+
+@dataclass
+class StoreItem:
+    """ストアの商品 1 点。表示に要る名前・画像・価格を持ち、保存した内容だけで描ける。"""
+    offer_id: str = ""
+    name: str = ""
+    icon: str | None = None
+    cost: int = 0               # 今の価格 (VP)。ナイトマーケットでは割引後
+    base_cost: int = 0          # 割引前
+    discount_percent: int = 0
+    tier_name: str = ""
+    tier_color: str = "#8b8b8b"
+
+
+@dataclass
+class StoreBundle:
+    name: str = ""
+    icon: str | None = None
+    base_cost: int = 0
+    cost: int = 0
+    discount_percent: int = 0
+    ends_at: float = 0.0
+
+
+@dataclass
+class StoreData:
+    saved_at: float = 0.0
+    daily: list[StoreItem] = field(default_factory=list)
+    daily_ends_at: float = 0.0          # 日替わりが入れ替わる時刻 (epoch 秒)
+    night: list[StoreItem] = field(default_factory=list)
+    night_ends_at: float = 0.0
+    bundles: list[StoreBundle] = field(default_factory=list)
+    from_saved: bool = False
+    fetch_error: str = ""
+
+    def expired(self, now: float | None = None) -> bool:
+        """日替わりの入れ替え時刻を過ぎている (＝今のストアとは違う)。"""
+        now = time.time() if now is None else now
+        return bool(self.daily_ends_at) and now >= self.daily_ends_at
+
+
 @dataclass
 class WeaponSkin:
     name: str
@@ -324,8 +367,10 @@ SORT_MODES = ("recent", "manual", "rank")
 # 進捗を UI に伝えるコールバック (イベントは dict)。None なら何もしない
 Events = Callable[[dict], None] | None
 
-REFRESH_STEPS = ("rank", "history", "skins")
-STEP_LABELS = {"rank": "ランク", "history": "戦績", "skins": "スキン"}
+REFRESH_STEPS = ("rank", "history", "skins", "store")
+# 保留 (⚠) の判定に使う、中心の 3 つ。ストアが取れなくても保留にはしない
+CORE_STEPS = ("rank", "history", "skins")
+STEP_LABELS = {"rank": "ランク", "history": "戦績", "skins": "スキン", "store": "ストア"}
 
 
 @dataclass
@@ -342,8 +387,8 @@ class RefreshReport:
 
     @property
     def held(self) -> bool:
-        """3 つとも失敗した (＝保留にするアカウント)。"""
-        return len(self.errors) >= len(REFRESH_STEPS)
+        """ランク・戦績・スキンの 3 つとも失敗した (＝保留にするアカウント)。"""
+        return all(step in self.errors for step in CORE_STEPS)
 
 
 class _RefreshContext:
@@ -378,6 +423,10 @@ class _RefreshContext:
                 raise
         return self._client
 
+    @property
+    def puuid(self) -> str:
+        return self._result.puuid if self._result is not None else ""
+
     def apply_identity(self) -> None:
         """認証で分かった puuid / Riot ID / リージョンをアカウントに反映する。"""
         if self._result is None:
@@ -396,6 +445,8 @@ class AccountService:
         self.match_cache = MatchCache(vault.app_dir / "cache")
         # アカウントごとの戦績 JSON (history/<account.id>.json)
         self.history = HistoryStore(vault.app_dir / "history")
+        # アカウントごとのストア JSON (store/<account.id>.json)
+        self.store_store = HistoryStore(vault.app_dir / "store")
         # HenrikDev モードで戦績一覧を取ったときの生データ。スコアボードを
         # 開くときに (アプリを再起動していなければ) 取り直さずに使う。
         self._henrik_raw_matches: dict[str, dict] = {}
@@ -1143,6 +1194,7 @@ class AccountService:
             "rank": lambda: self._refresh_rank(account, ctx, progress),
             "history": lambda: self._refresh_history(account, progress),
             "skins": lambda: self._refresh_skins(account, ctx, progress),
+            "store": lambda: self._refresh_store(account, ctx, progress),
         }
         emit = events or (lambda _e: None)
         for step in steps:
@@ -1175,6 +1227,140 @@ class AccountService:
                 progress(f"[{i}/{len(accounts)}] {msg}")
             reports[acc.id] = self.refresh_account(acc, progress=tagged)
         return reports
+
+    # -- ストア -------------------------------------------------------------
+    def saved_store(self, account: Account) -> StoreData | None:
+        """保存済みのストア。通信しない。無ければ None。"""
+        data = self.store_store.load(account.id)
+        if not data.get("daily") and not data.get("bundles") and not data.get("night"):
+            return None
+
+        def items(key: str) -> list[StoreItem]:
+            names = {f.name for f in fields(StoreItem)}
+            return [StoreItem(**{k: v for k, v in raw.items() if k in names})
+                    for raw in data.get(key) or [] if isinstance(raw, dict)]
+
+        bundle_names = {f.name for f in fields(StoreBundle)}
+        return StoreData(
+            saved_at=float(data.get("saved_at") or 0.0),
+            daily=items("daily"), daily_ends_at=float(data.get("daily_ends_at") or 0.0),
+            night=items("night"), night_ends_at=float(data.get("night_ends_at") or 0.0),
+            bundles=[StoreBundle(**{k: v for k, v in b.items() if k in bundle_names})
+                     for b in data.get("bundles") or [] if isinstance(b, dict)],
+            from_saved=True,
+        )
+
+    def fetch_store(self, account: Account, progress: Progress = _noop,
+                    ctx: "_RefreshContext | None" = None) -> StoreData:
+        """今日のストアを取得して保存する。そのアカウント自身のトークンが要る
+        (ログインしている / 認証できるアカウントだけ)。"""
+        progress(f"{account.display_name}: ストアを取得中…")
+        ctx = ctx or _RefreshContext(self, account)
+        client = ctx.client()
+        raw = client.storefront(ctx.puuid or account.puuid)
+        ctx.apply_identity()
+        data = self._build_store(raw)
+        data.saved_at = time.time()
+        payload = asdict(data)
+        for key in ("from_saved", "fetch_error"):
+            payload.pop(key, None)
+        self.store_store.update(account.id, lambda d: (d.clear(), d.update(payload)))
+        return data
+
+    def store(self, account: Account, progress: Progress = _noop) -> StoreData:
+        """ストアを返す。取得できなければ保存済みを返し、理由を fetch_error に入れる。
+        保存も無ければ例外。"""
+        try:
+            return self.fetch_store(account, progress)
+        except Exception as exc:
+            saved = self.saved_store(account)
+            if saved is None:
+                raise
+            saved.fetch_error = str(exc) or type(exc).__name__
+            return saved
+
+    def _build_store(self, raw: dict) -> StoreData:
+        """API の応答 (SkinsPanelLayout 等) を、表示用の StoreData にする。"""
+        now = time.time()
+        try:
+            weapons = self.content.weapons()
+            tiers = self.content.content_tiers()
+        except content.ContentError:
+            weapons, tiers = {}, {}
+        try:
+            bundles_meta = self.content.bundles()
+        except content.ContentError:
+            bundles_meta = {}
+
+        level_to_skin: dict[str, dict] = {}
+        for w in weapons.values():
+            for skin in w["skins"].values():
+                for level_id in skin["levels"]:
+                    level_to_skin[level_id] = skin
+
+        def cost_of(offer: dict, key: str = "Cost") -> int:
+            costs = offer.get(key) or {}
+            if VP_CURRENCY_ID in costs:
+                return int(costs[VP_CURRENCY_ID])
+            return int(next(iter(costs.values()), 0))
+
+        def make_item(offer_id: str, cost: int, base: int = 0, discount: int = 0) -> StoreItem:
+            skin = level_to_skin.get(offer_id) or {}
+            tier = tiers.get(skin.get("tier", ""), {})
+            return StoreItem(
+                offer_id=offer_id, name=skin.get("name") or "不明なスキン",
+                icon=skin.get("icon"), cost=cost, base_cost=base or cost,
+                discount_percent=discount,
+                tier_name=tier.get("name", ""), tier_color=tier.get("color", "#8b8b8b"),
+            )
+
+        panel = raw.get("SkinsPanelLayout") or {}
+        offers_by_id = {o.get("OfferID"): o for o in panel.get("SingleItemStoreOffers") or []}
+        daily = []
+        for offer_id in panel.get("SingleItemOffers") or []:
+            offer = offers_by_id.get(offer_id) or {}
+            daily.append(make_item(offer_id, cost_of(offer)))
+        daily_left = float(panel.get("SingleItemOffersRemainingDurationInSeconds") or 0)
+
+        night = []
+        bonus = raw.get("BonusStore") or {}
+        for entry in bonus.get("BonusStoreOffers") or []:
+            offer = entry.get("Offer") or {}
+            rewards = offer.get("Rewards") or [{}]
+            offer_id = rewards[0].get("ItemID") or offer.get("OfferID", "")
+            night.append(make_item(
+                offer_id, cost_of(entry, "DiscountCosts"), cost_of(offer),
+                int(entry.get("DiscountPercent") or 0)))
+        night_left = float(bonus.get("BonusStoreRemainingDurationInSeconds") or 0)
+
+        bundles = []
+        featured = raw.get("FeaturedBundle") or {}
+        listed = featured.get("Bundles") or ([featured["Bundle"]] if featured.get("Bundle") else [])
+        for bundle in listed:
+            meta = bundles_meta.get(bundle.get("DataAssetID", ""), {})
+
+            def total(key: str) -> int:
+                value = bundle.get(key)
+                if isinstance(value, dict):
+                    return int(value.get(VP_CURRENCY_ID, next(iter(value.values()), 0)))
+                return int(value or 0)
+
+            base, now_cost = total("TotalBaseCost"), total("TotalDiscountedCost")
+            bundles.append(StoreBundle(
+                name=meta.get("name") or "バンドル", icon=meta.get("icon"),
+                base_cost=base, cost=now_cost or base,
+                discount_percent=round(100 * (1 - now_cost / base)) if base and now_cost else 0,
+                ends_at=now + float(bundle.get("DurationRemainingInSeconds") or 0),
+            ))
+        return StoreData(
+            daily=daily, daily_ends_at=(now + daily_left) if daily_left else 0.0,
+            night=night, night_ends_at=(now + night_left) if night_left else 0.0,
+            bundles=bundles,
+        )
+
+    def _refresh_store(self, account: Account, ctx: "_RefreshContext",
+                       progress: Progress) -> None:
+        self.fetch_store(account, progress, ctx)
 
     def act_status(self, now: float | None = None) -> dict | None:
         """今のアクト (コンペのシーズン) の名前と終了までの残り。取れなければ None。

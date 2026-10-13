@@ -123,6 +123,15 @@ class ContentCache:
                 out[m["uuid"]] = info
         return out
 
+    def bundles(self) -> dict[str, dict]:
+        """バンドル uuid -> {name, icon}。ストアのバンドル名の表示に使う。"""
+        data = self.fetch("bundles", "/bundles") or []
+        return {
+            b["uuid"]: {"name": b.get("displayName", ""),
+                        "icon": b.get("displayIcon") or b.get("displayIcon2")}
+            for b in data
+        }
+
     def acts(self) -> list[dict]:
         """アクト (ランクのシーズン単位) を開始日の古い順に。
         [{"uuid", "name": "ACT V", "start": epoch 秒, "end": epoch 秒}]。ランクの履歴 (mmr の
