@@ -1342,6 +1342,106 @@ def test_browser_open() -> None:
         browser._candidates, browser.subprocess.Popen, browser.webbrowser.open = saved
 
 
+def test_borrowed_history() -> None:
+    section("ログイン中でないアカウントの戦績 (他アカウントのトークンを借りる)")
+    from vam.models import Account
+    from vam.riot import api, auth
+    from vam.service import AccountService, ServiceError
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)  # API キー無し = サインインモード
+    svc.content.client_version = lambda: "v"
+    svc.content.agents = lambda: {"ag1": {"name": "ジェット", "icon": ""}}
+    svc.content.maps = lambda: {"map1": {"name": "アセント", "icon": ""}}
+    svc.content.tier_names = lambda: {}
+    sub = Account(label="sub", puuid="SUB-PUUID", region="ap", session_saved=True)
+    vault.add(sub)
+    state = {"borrow": True, "borrow_calls": 0}
+    seen = {"history": [], "summary": [], "details": []}
+
+    def own_auth(account):
+        raise ServiceError("今ログインしているのは別のアカウントです")
+
+    def borrow(account, allow_other=False):
+        state["borrow_calls"] += 1
+        if not state["borrow"]:
+            raise ServiceError("Riot Client が起動していません")
+        check("借りるときは allow_other", allow_other is True)
+        return auth.AuthResult(access_token="t", entitlements_token="e", puuid="MAIN-PUUID",
+                               region="ap")
+
+    class FakeClient:
+        def __init__(self, result, **k):
+            seen["token_owner"] = result.puuid
+
+        def competitive_history(self, puuid=None, count=20):
+            seen["history"].append(puuid)
+            return [api.CompetitiveUpdate(match_id="mS", map_id="map1", season_id="x",
+                    started_at=1000, tier_before=12, tier_after=13, rr_before=10,
+                    rr_after=30, rr_earned=20)]
+
+        def match_summary(self, match_id, puuid=None):
+            seen["summary"].append(puuid)
+            return api.MatchSummary(match_id=match_id, map_id="map1", character_id="ag1",
+                                    won=True, kills=20, deaths=10, assists=3, score=5000,
+                                    team_score=13, enemy_score=7, headshots=5, bodyshots=10,
+                                    legshots=1)
+
+        def match_details(self, match_id):
+            seen["details"].append(match_id)
+            return {"players": [
+                {"subject": "SUB-PUUID", "teamId": "Red", "gameName": "Sub", "tagLine": "1",
+                 "characterId": "ag1", "stats": {"score": 5000, "kills": 20, "deaths": 10,
+                                                 "assists": 3}},
+                {"subject": "x", "teamId": "Blue", "gameName": "E", "tagLine": "2",
+                 "characterId": "ag1", "stats": {"score": 3000}}],
+                "teams": [{"teamId": "Red", "won": True, "numPoints": 13},
+                          {"teamId": "Blue", "won": False, "numPoints": 7}],
+                "matchInfo": {"matchId": match_id, "mapId": "map1", "gameStartMillis": 1000},
+                "roundResults": []}
+
+    saved = (api.ValorantApi, svc.authenticate, svc._authenticate_via_local_api)
+    api.ValorantApi = FakeClient
+    svc.authenticate = own_auth
+    svc._authenticate_via_local_api = borrow
+    try:
+        stats = svc.match_stats(sub)
+        check("借りたトークンで本人の戦績を取れる", stats.games == 1 and stats.fetch_error == "")
+        check("対象は本人の puuid", seen["history"] == ["SUB-PUUID"], str(seen["history"]))
+        check("トークンの持ち主は別アカウント", seen["token_owner"] == "MAIN-PUUID")
+        check("試合の集計も本人の puuid", seen["summary"] == ["SUB-PUUID"], str(seen["summary"]))
+        check("JSON に保存される", svc.history.path_for(sub.id).is_file())
+
+        detail = svc.match_detail(sub, "mS")
+        check("試合詳細も借りて取れる", detail.match_id == "mS" and len(detail.my_team) == 1)
+        check("自分の行が本人になる", detail.my_team[0].is_self and detail.my_team[0].riot_id == "Sub#1")
+        check("試合詳細も JSON に保存される",
+              "mS" in (svc.history.load(sub.id).get("details") or {}))
+        seen["details"].clear()
+        svc.match_detail(sub, "mS")
+        check("保存済みなら通信しない", seen["details"] == [])
+
+        # 誰もログインしていない: 保存済みは見られ、取得失敗として知らせる
+        state["borrow"] = False
+        offline = svc.match_stats(sub)
+        check("借りられなくても保存済みを返す", offline.games == 1 and "起動していません" in offline.fetch_error,
+              offline.fetch_error)
+
+        # puuid が無いと誰の戦績か分からない
+        anon = Account(label="anon", session_saved=True)
+        vault.add(anon)
+        state["borrow"] = True
+        try:
+            svc.match_stats(anon)
+            check("puuid 不明は取得できない", False, "例外が出なかった")
+        except ServiceError:
+            check("puuid 不明は取得できない", True)
+    finally:
+        api.ValorantApi, svc.authenticate, svc._authenticate_via_local_api = saved
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -1607,7 +1707,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history,
                test_status_notify, test_ui):
         try:
             fn()

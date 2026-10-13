@@ -950,7 +950,8 @@ class AccountService:
         # ローテーションで元のセッションを失効させる心配がない。
         return self._authenticate_via_local_api(account)
 
-    def _authenticate_via_local_api(self, account: Account) -> auth.AuthResult:
+    def _authenticate_via_local_api(self, account: Account,
+                                    allow_other: bool = False) -> auth.AuthResult:
         client = localapi.LocalClient()
         if not client.available:
             raise ServiceError(
@@ -964,7 +965,8 @@ class AccountService:
         except localapi.LocalApiError as exc:
             raise ServiceError(f"ローカル API から取得できませんでした: {exc}") from exc
 
-        if account.puuid and local.puuid and local.puuid != account.puuid:
+        if (not allow_other and account.puuid and local.puuid
+                and local.puuid != account.puuid):
             raise ServiceError(
                 f"今ログインしているのは別のアカウントです"
                 f"（{local.riot_id or local.puuid[:8]}）。"
@@ -1269,7 +1271,7 @@ class AccountService:
         self._prefetch_details(account, stats.matches)
 
     def _prefetch_details(self, account: Account, rows: list[MatchListRow],
-                          limit: int = 5) -> None:
+                          limit: int = 10) -> None:
         """直近の試合のスコアボードを保存しておく。ログインしていない
         (最新を取れない) 状態でも、サブアカウントの試合詳細を開けるように。
         失敗しても更新全体は失敗にしない。"""
@@ -1503,6 +1505,35 @@ class AccountService:
             ))
         return rows
 
+    def _history_reader(self, account: Account) -> tuple["api.ValorantApi", str]:
+        """戦績を読むための (クライアント, 対象アカウントの puuid) を返す。
+
+        本人としてログインできるなら本人のトークンを使う。できなければ
+        (別のアカウントがログイン中、セッション失効など)、いまログイン中の
+        アカウントのトークンを借りる。ランク・試合一覧・試合詳細は、トークンの
+        持ち主と関係なく、puuid / 試合 ID を指定すれば誰の分でも引けるため。
+        """
+        try:
+            version = self.content.client_version()
+        except content.ContentError:
+            version = ""
+        try:
+            result = self.authenticate(account)
+            target = result.puuid or account.puuid
+        except Exception as own_error:
+            if not account.puuid:
+                raise  # 誰の戦績か特定できない (一度更新して puuid を取る必要がある)
+            try:
+                result = self._authenticate_via_local_api(account, allow_other=True)
+            except Exception as borrow_error:
+                # 借りられる人もいない (Riot Client が止まっている・ログアウト中)。
+                # 「別のアカウントです」より、こちらの理由の方が実情に合う
+                raise borrow_error from own_error
+            target = account.puuid
+        client = api.ValorantApi(result, region=account.region or result.region,
+                                 client_version=version)
+        return client, target
+
     def _fetch_rows_via_local_api(self, account: Account, count: int,
                                   progress: Progress) -> list[MatchListRow]:
         """競技試合一覧は毎回取り直す (安い、1 回の通信)。試合ごとの詳細は
@@ -1510,14 +1541,8 @@ class AccountService:
         キャッシュに残し、次回はまだ持っていない (＝新しく増えた) 試合の
         分だけ通信する。
         """
-        result = self.authenticate(account)
-        try:
-            version = self.content.client_version()
-        except content.ContentError:
-            version = ""
-        client = api.ValorantApi(result, region=result.region or account.region,
-                                 client_version=version)
-        matches = client.competitive_history(count=count)
+        client, target = self._history_reader(account)
+        matches = client.competitive_history(puuid=target, count=count)
 
         try:
             agents = self.content.agents()
@@ -1530,15 +1555,15 @@ class AccountService:
 
         rows: list[MatchListRow] = []
         for i, m in enumerate(matches):
-            summary = self.match_cache.get(result.puuid, m.match_id)
+            summary = self.match_cache.get(target, m.match_id)
             if summary is None:
                 progress(f"{account.display_name}: 試合 {i + 1}/{len(matches)} の詳細を取得中…")
                 try:
-                    summary = client.match_summary(m.match_id, puuid=result.puuid)
+                    summary = client.match_summary(m.match_id, puuid=target)
                 except api.ApiError:
                     summary = None
                 if summary:
-                    self.match_cache.put(result.puuid, summary)
+                    self.match_cache.put(target, summary)
             if not summary:
                 continue
 
@@ -1680,15 +1705,10 @@ class AccountService:
         )
 
     def _match_detail_via_local_api(self, account: Account, match_id: str) -> MatchDetail:
-        result = self.authenticate(account)
-        try:
-            version = self.content.client_version()
-        except content.ContentError:
-            version = ""
-        client = api.ValorantApi(result, region=result.region or account.region,
-                                 client_version=version)
+        client, puuid = self._history_reader(account)
         data = client.match_details(match_id)
-        puuid = result.puuid
+        if not data.get("players"):
+            raise ServiceError("試合データが見つかりませんでした。")
 
         all_players = data.get("players") or []
         me = next((p for p in all_players if p.get("subject") == puuid), None)
