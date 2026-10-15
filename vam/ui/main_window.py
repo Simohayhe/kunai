@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .. import browser, diagnostics, updater
 from ..models import Account
+from ..riot import gameversion
 from ..riot import process as riot_process
 from ..service import REFRESH_STEPS, STEP_LABELS, AccountService
 from ..storage import Vault
@@ -79,6 +80,10 @@ class MainWindow(QMainWindow):
         # 一括更新で 3 つとも失敗したアカウント id -> {ステップ名: 理由} (保留)
         self._held: dict[str, dict[str, str]] = {}
         self._cycling = False   # 一括更新で Riot Client を入れ替えている最中
+        # VALORANT のアップデートが済んでいない (古い) か。分からないときは False
+        self._game_outdated = False
+        self._game_prompted: str | None = None   # 案内を出した最新版の ID (同じ版で何度も出さない)
+        self._game_checking = False
         self._cycle_auto = False  # いまの入れ替えは、ストアの自動取得か
         self._refresh_cancel_event: threading.Event | None = None
         # 所持品の集計はアカウントの所持データが変わらない限り同じ結果になる
@@ -127,6 +132,12 @@ class MainWindow(QMainWindow):
         self._act_timer.timeout.connect(self._render_act)
         self.update_act_countdown()
 
+        # VALORANT のアップデート確認 (起動の少し後と、30 分ごと)
+        self._game_timer = QTimer(self)
+        self._game_timer.timeout.connect(self.check_game_version)
+        self._game_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(8_000, self.check_game_version)
+
         # ストアの自動取得 (設定が入のときだけ動く)。5 分ごとに条件を見る
         self._auto_store_timer = QTimer(self)
         self._auto_store_timer.timeout.connect(self.check_auto_store)
@@ -153,6 +164,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.refresh_progress)
         layout.addWidget(self._build_header())
         layout.addWidget(self._build_status_banner())
+        layout.addWidget(self._build_game_banner())
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
@@ -272,6 +284,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_banner_label, 1)
         self.status_banner.setVisible(False)
         return self.status_banner
+
+    def _build_game_banner(self) -> QWidget:
+        """VALORANT のアップデートが済んでいないときに出す帯。"""
+        self.game_banner = QFrame()
+        self.game_banner.setStyleSheet(f"QFrame {{ background:{theme.ACCENT}; }}")
+        layout = QHBoxLayout(self.game_banner)
+        layout.setContentsMargins(18, 7, 18, 7)
+        label = QLabel("VALORANT が最新版ではありません。アップデートしてください。"
+                       "（古いままだと、ランクなどを取得できないことがあります）")
+        label.setStyleSheet("color:#ffffff; font-size:12px; font-weight:700; border:none;")
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+        self.game_banner.setVisible(False)
+        return self.game_banner
 
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
@@ -1201,6 +1227,8 @@ class MainWindow(QMainWindow):
         """
         if self._busy:
             return
+        if not auto and not self._confirm_game_updated():
+            return
         if auto:
             accounts = self.service.store_stale_accounts()
             if not accounts or riot_process.running():
@@ -1275,11 +1303,59 @@ class MainWindow(QMainWindow):
             self.refresh_all_button.setText("すべて更新")
             self.refresh_all_button.setToolTip("全アカウントをまとめて更新します (Ctrl+Shift+R)")
 
+    # -- VALORANT のアップデート --------------------------------------------
+    UPDATE_NEEDED_TEXT = (
+        "VALORANT が最新版ではありません。\n"
+        "Riot Client で VALORANT をアップデートしてください。\n\n"
+        "古いままだと、ランクなどを取得できないことがあります。"
+    )
+
+    def check_game_version(self) -> None:
+        if self._standby or self._game_checking:
+            return
+        self._game_checking = True
+        workers.run(
+            self.service.game_version,
+            on_done=self._on_game_version,
+            on_error=lambda m: self._on_game_version_failed(m),
+        )
+
+    def _on_game_version_failed(self, message: str) -> None:
+        self._game_checking = False
+        diagnostics.log(f"VALORANT の版の確認に失敗: {message}")
+
+    def _on_game_version(self, version) -> None:
+        self._game_checking = False
+        was_outdated = self._game_outdated
+        self._game_outdated = bool(version.outdated)
+        self.game_banner.setVisible(self._game_outdated)
+        if self._game_outdated:
+            # 新しい版が出るたびに 1 回だけ、エラーとして案内する (毎回は出さない)
+            if self._game_prompted != version.latest:
+                self._game_prompted = version.latest
+                QMessageBox.warning(self, "VALORANT のアップデートが必要です", self.UPDATE_NEEDED_TEXT)
+        elif was_outdated:
+            self.status.showMessage("VALORANT が最新版になりました", 8000)
+
+    def _confirm_game_updated(self) -> bool:
+        """更新を始めてよいか。VALORANT が古いと分かっていれば、アップデートを促して止める。
+        「それでも更新する」を選べば続ける (版の判定が合っていないときの逃げ道)。"""
+        if not self._game_outdated:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("VALORANT のアップデートが必要です")
+        box.setText(self.UPDATE_NEEDED_TEXT)
+        box.addButton("OK", QMessageBox.AcceptRole)
+        force = box.addButton("それでも更新する", QMessageBox.DestructiveRole)
+        box.exec()
+        return box.clickedButton() is force
+
     def check_auto_store(self) -> None:
         """ストアの自動取得。設定が入で、Riot Client もゲームも止まっていて、
         今日のストアを持っていないアカウントがあるときだけ、裏で取得する。"""
-        if self._busy or self._cycling or self._auto_refreshing:
-            return
+        if self._busy or self._cycling or self._auto_refreshing or self._game_outdated:
+            return   # VALORANT が古いあいだは、自動取得も動かさない (取れないため)
         if self.service.auto_store_due():
             self.service.mark_auto_store_run()   # 失敗しても短時間に繰り返さない
             self.refresh_all(auto=True)

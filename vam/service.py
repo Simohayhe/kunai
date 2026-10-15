@@ -16,7 +16,8 @@ from .models import Account, InventoryInfo, RankInfo, WalletInfo
 from .storage import Vault
 from . import paths
 from .riot import (
-    api, auth, autologin, content, henrik, launcher, localapi, process, session, status, windows,
+    api, auth, autologin, content, gameversion, henrik, launcher, localapi, process, session,
+    status, windows,
 )
 
 Progress = Callable[[str], None]
@@ -1458,6 +1459,21 @@ class AccountService:
 
     # ストアが入れ替わるのは毎日 00:00 UTC (日本時間 9:00)
     STORE_RESET_SECONDS = 86400
+
+    # -- VALORANT のアップデート確認 ---------------------------------------------
+    def _patch_region(self) -> str:
+        """パッチ情報を引く地域。登録アカウントで一番多い地域 (既定 ap)。"""
+        counts: dict[str, int] = {}
+        for acc in self.vault.accounts():
+            if acc.region in api.REGIONS:
+                counts[acc.region] = counts.get(acc.region, 0) + 1
+        return max(counts, key=counts.get) if counts else "ap"
+
+    def game_version(self) -> "gameversion.GameVersion":
+        """インストール済みの VALORANT の版と、最新の版。モック環境では比べない。"""
+        if process.mock_mode():
+            return gameversion.GameVersion()
+        return gameversion.check(self._patch_region())
 
     def store_stale_accounts(self, now: float | None = None) -> list[Account]:
         """今日のストアをまだ持っていないアカウント (保存が無い / 入れ替わり済み)。

@@ -2211,6 +2211,133 @@ def test_rank_fallbacks() -> None:
           snapshot.seasons["s1"]["rank"] == 16 and snapshot.seasons["s1"]["best"] == 17, str(snapshot.seasons))
 
 
+def test_game_version() -> None:
+    section("VALORANT のアップデート確認 (古いときは「アップデートしてください」)")
+    import os
+    import struct
+    from vam.riot import gameversion as gv
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    # ---- インストール済みの版: 製品マニフェストの先頭の ID
+    base = Path(tempfile.mkdtemp())
+    manifest = base / "Riot Games" / "Metadata" / "valorant.live" / "valorant.live.manifest"
+    manifest.parent.mkdir(parents=True)
+    header = b"RMAN" + bytes([2, 1, 0, 2]) + struct.pack("<IIQI", 28, 0, 0xD80C1E655919DF6E, 0)
+    manifest.write_bytes(header + b"body")
+    saved_env = os.environ.get("PROGRAMDATA")
+    os.environ["PROGRAMDATA"] = str(base)
+    try:
+        check("インストール済みのマニフェスト ID を読む", gv.installed_manifest_id() == "D80C1E655919DF6E",
+              str(gv.installed_manifest_id()))
+        manifest.write_bytes(b"XXXX" + header[4:])
+        check("マニフェストでないファイルは読まない", gv.installed_manifest_id() is None)
+        manifest.write_bytes(b"RMAN")
+        check("短すぎるファイルでも落ちない", gv.installed_manifest_id() is None)
+        manifest.unlink()
+        check("ファイルが無ければ None", gv.installed_manifest_id() is None)
+    finally:
+        if saved_env is None:
+            os.environ.pop("PROGRAMDATA", None)
+        else:
+            os.environ["PROGRAMDATA"] = saved_env
+
+    # ---- 最新の版: 公開設定の patch_url の ID
+    class Resp:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.data
+
+    configs = [
+        {"id": "na", "patch_url": "https://x/channels/public/releases/AAAAAAAAAAAAAAAA.manifest"},
+        {"id": "ap", "patch_url": "https://x/channels/public/releases/d80c1e655919df6e.manifest"},
+    ]
+    payload = {"keystone.products.valorant.patchlines.live": {"platforms": {"win": {"configurations": configs}}}}
+    saved_get = gv.requests.get
+    gv.requests.get = lambda url, timeout=15: Resp(payload)
+    try:
+        check("自分の地域の最新 ID (大文字にそろえる)", gv.latest_manifest_id("ap") == "D80C1E655919DF6E")
+        check("地域が無ければ、どれかの ID", gv.latest_manifest_id("kr") == "AAAAAAAAAAAAAAAA")
+        payload["keystone.products.valorant.patchlines.live"] = {}
+        check("形式が違っても落ちず、分からない扱い", gv.latest_manifest_id("ap") is None)
+
+        def boom(url, timeout=15):
+            raise gv.requests.ConnectionError("offline")
+        gv.requests.get = boom
+        check("通信できなければ分からない扱い", gv.latest_manifest_id("ap") is None)
+    finally:
+        gv.requests.get = saved_get
+
+    # ---- 古いかどうかの判定
+    check("違えば古い", gv.GameVersion("AAAA", "BBBB").outdated)
+    check("同じなら古くない", not gv.GameVersion("AAAA", "AAAA").outdated)
+    check("最新が分からなければ警告しない", not gv.GameVersion("AAAA", None).outdated)
+    check("インストール済みが分からなければ警告しない", not gv.GameVersion(None, "BBBB").outdated)
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    check("モック環境では比べない", not svc.game_version().outdated)
+
+    # ---- 画面の動き
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from vam.ui import main_window as mw
+    QApplication.instance() or QApplication([])
+
+    class Status:
+        shown = []
+
+        def showMessage(self, text, *a):
+            self.shown.append(text)
+
+    class Banner:
+        visible = None
+
+        def setVisible(self, v):
+            self.visible = v
+
+    class Fake:
+        UPDATE_NEEDED_TEXT = mw.MainWindow.UPDATE_NEEDED_TEXT
+        status = Status()
+        game_banner = Banner()
+        _game_outdated = False
+        _game_prompted = None
+        _game_checking = True
+
+    asked = []
+    saved_warn = QMessageBox.warning
+    QMessageBox.warning = staticmethod(lambda *a, **k: asked.append((a[1], a[2])) or QMessageBox.Ok)
+    try:
+        mw.MainWindow._on_game_version(Fake, gv.GameVersion("OLD", "NEW"))
+        check("古いと分かったらエラーとして「アップデートしてください」を出す",
+              len(asked) == 1 and "アップデートしてください" in asked[0][1] and "必要" in asked[0][0], str(asked))
+        check("赤い帯が出る", Fake.game_banner.visible is True and Fake._game_outdated is True)
+        mw.MainWindow._on_game_version(Fake, gv.GameVersion("OLD", "NEW"))
+        check("同じ版では 2 回目の案内を出さない", len(asked) == 1)
+        mw.MainWindow._on_game_version(Fake, gv.GameVersion("OLD", "NEWER"))
+        check("さらに新しい版が出たら、また案内する", len(asked) == 2)
+        mw.MainWindow._on_game_version(Fake, gv.GameVersion("NEWER", "NEWER"))
+        check("アップデートが済んだら帯が消え、知らせる",
+              Fake.game_banner.visible is False and Fake._game_outdated is False
+              and any("最新版になりました" in m for m in Status.shown), str(Status.shown))
+        check("確認が終わった印に戻る", Fake._game_checking is False)
+        mw.MainWindow._on_game_version(Fake, gv.GameVersion(None, None))
+        check("版が分からなければ何も出さない", len(asked) == 2 and Fake.game_banner.visible is False)
+    finally:
+        QMessageBox.warning = saved_warn
+
+    class Ctl:
+        UPDATE_NEEDED_TEXT = mw.MainWindow.UPDATE_NEEDED_TEXT
+        _game_outdated = False
+    check("古くなければ更新を始めてよい", mw.MainWindow._confirm_game_updated(Ctl) is True)
+    check("モック: ソースに「アップデートしてください」がある", "アップデートしてください" in mw.MainWindow.UPDATE_NEEDED_TEXT)
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -2490,7 +2617,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_refresh_picker, test_rank_fallbacks, test_switch_with_linked_data,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_refresh_picker, test_rank_fallbacks, test_game_version, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()
