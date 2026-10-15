@@ -151,6 +151,9 @@ class MmrSnapshot:
     peak_tier: int = 0
     peak_season: str = ""
     season_id: str = ""
+    # 最後に遊んだ競技試合の直後のランク (LatestCompetitiveUpdate)。シーズンの記録が無くても取れる
+    latest_tier: int = 0
+    latest_rr: int = 0
     # act uuid -> {"tier","rr","wins","games","leaderboard"}。過去アクトの最終ランクを引くのに使う
     seasons: dict[str, dict] = field(default_factory=dict)
     history: list[CompetitiveUpdate] = field(default_factory=list)
@@ -219,6 +222,8 @@ class ValorantApi:
 
         latest = data.get("LatestCompetitiveUpdate") or {}
         snap.season_id = latest.get("SeasonID", "")
+        snap.latest_tier = latest.get("TierAfterUpdate", 0) or 0
+        snap.latest_rr = latest.get("RankedRatingAfterUpdate", 0) or 0
 
         current = seasons.get(snap.season_id) if snap.season_id else None
         if current is None and seasons:

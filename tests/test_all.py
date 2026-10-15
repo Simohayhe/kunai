@@ -2151,6 +2151,39 @@ def test_rank_fallbacks() -> None:
     r = run({}, old_tier=16)
     check("前回のランクを残すときは前回と分かる印を付ける", r.tier == 16 and r.carried_from == "前回", str(r))
 
+    # シーズンの記録が空でも、最後に遊んだ試合の直後のランク (LatestCompetitiveUpdate) を使う
+    snap["value"] = api.MmrSnapshot(tier=0, season_id="actB", latest_tier=18, seasons={})
+    acc = Account(label="latest")
+    svc._refresh_rank(acc, ctx_for(acc), lambda m: None)
+    check("シーズンの記録が空でも、最後の試合直後のランクを使う",
+          acc.rank.tier == 18 and acc.rank.carried_from == "前アクト", str(acc.rank))
+
+    # それも無ければ、保存してある戦績の試合ごとのランクから
+    from vam.service import MatchListRow
+    saved_acc = Account(label="savedrows")
+    vault.add(saved_acc)
+    svc._save_rows(saved_acc, [MatchListRow(match_id="n", started_at=3000, tier_after=0),
+                               MatchListRow(match_id="m", started_at=2000, tier_after=16, rr_after=40),
+                               MatchListRow(match_id="l", started_at=1000, tier_after=12)], "api")
+    snap["value"] = api.MmrSnapshot(tier=0, season_id="", seasons={})
+    svc._refresh_rank(saved_acc, ctx_for(saved_acc), lambda m: None)
+    check("保存した戦績の、いちばん新しいランク付きの試合から取る",
+          saved_acc.rank.tier == 16 and saved_acc.rank.carried_from == "前回の試合", str(saved_acc.rank))
+
+    fake_mmr = api.MmrSnapshot()
+    check("MmrSnapshot に最後の試合のランクの欄がある", hasattr(fake_mmr, "latest_tier"))
+
+    class LatestApi(api.ValorantApi):
+        def __init__(self):
+            super().__init__(auth.AuthResult(access_token="t", puuid="me"), region="ap")
+
+        def _get(self, path):
+            return {"LatestCompetitiveUpdate": {"SeasonID": "s0", "TierAfterUpdate": 17,
+                                                "RankedRatingAfterUpdate": 55},
+                    "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": None}}}
+    got = LatestApi().mmr()
+    check("API が最後の試合のランクを読む", got.latest_tier == 17 and got.latest_rr == 55, str(got))
+
     # アクト表が取れないとき
     saved = svc.content.acts
     from vam.riot import content as _content

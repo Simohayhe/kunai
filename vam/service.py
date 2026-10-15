@@ -1633,6 +1633,14 @@ class AccountService:
             # 以前の決め方 (最後に遊んだシーズンのランク) なら取れる
             cur_tier, cur_rr, cur_wins, cur_games, cur_lb = legacy
             carried_from = carried_from or "前アクト"
+        if cur_tier <= 2 and mmr.latest_tier > 2:
+            # シーズンごとの記録が空でも、最後に遊んだ競技試合の直後のランクは取れる
+            cur_tier, cur_rr, carried_from = mmr.latest_tier, 0, "前アクト"
+        if cur_tier <= 2:
+            # さらに、このアプリが保存してある戦績 (試合ごとのランク) からも探す
+            saved_tier = self._rank_from_saved_matches(account)
+            if saved_tier > 2:
+                cur_tier, cur_rr, carried_from = saved_tier, 0, "前回の試合"
         if cur_tier <= 2:
             # 原因を調べられるよう、判定の材料をログに残す (シーズン: (最終, Rank, 届いた最高))
             diagnostics.log(
@@ -1658,6 +1666,17 @@ class AccountService:
                                         updated_at=time.time())
         except api.ApiError:
             pass  # ウォレットだけの失敗はランク取得の失敗にしない
+
+    def _rank_from_saved_matches(self, account: Account) -> int:
+        """保存してある戦績の、いちばん新しい「ランクが付いていた試合」の直後のランク。"""
+        try:
+            rows, _saved_at, _source = self._load_saved(account)
+        except Exception:
+            return 0
+        for row in rows:     # 新しい順
+            if row.tier_after > 2:
+                return row.tier_after
+        return 0
 
     def _refresh_history(self, account: Account, progress: Progress) -> None:
         stats = self.match_stats(account, progress=progress)
