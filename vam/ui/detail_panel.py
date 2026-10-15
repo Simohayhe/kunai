@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QTabWidget, QVBoxLayout, QWidget,
@@ -592,6 +592,22 @@ class InventoryTab(QWidget):
         return row
 
 
+def store_reset_seconds(ends_at: float, now: float) -> float:
+    """ストアが入れ替わるまでの秒数。時刻が分からなければ、次の 00:00 UTC (日本時間 9:00)。"""
+    if ends_at:
+        return ends_at - now
+    return 86400 - (now % 86400)
+
+
+def hours_left_text(seconds: float) -> str:
+    """「あと 5 時間」。1 時間を切ったら「あと 1 時間未満」。"""
+    if seconds <= 0:
+        return "まもなく"
+    if seconds < 3600:
+        return "あと 1 時間未満"
+    return f"あと {int(seconds // 3600)} 時間"
+
+
 def _short_remaining(seconds: float) -> str:
     if seconds >= 86400:
         return f"{int(seconds // 86400)}D"
@@ -634,6 +650,12 @@ class StoreTab(QWidget):
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
 
+        # 開いたまま入れ替わりの時刻を過ぎても気づけるよう、1 分ごとに表示を計算し直す
+        self._data = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._update_status)
+        self._timer.start(60_000)
+
     def clear(self) -> None:
         while self.rows.count() > 1:
             item = self.rows.takeAt(0)
@@ -642,29 +664,50 @@ class StoreTab(QWidget):
 
     def set_message(self, text: str) -> None:
         self.clear()
+        self._data = None
         self.status_label.setText("")
+        self._mark_reload(False)
         msg = QLabel(text)
         msg.setObjectName("SubTitle")
         msg.setAlignment(Qt.AlignCenter)
         msg.setWordWrap(True)
         self.rows.insertWidget(0, msg)
 
+    def _mark_reload(self, needed: bool) -> None:
+        """入れ替わり後は「更新」ボタンを目立たせる。"""
+        self.reload.setStyleSheet(
+            f"QPushButton {{ border:1px solid {theme.WARN}; color:{theme.WARN}; font-weight:700; }}"
+            if needed else ""
+        )
+
+    def _update_status(self) -> None:
+        """取得した日付と、ストアが更新されるまでの時間を出す。更新後は「更新してください」。"""
+        data = self._data
+        if data is None:
+            return
+        now = time.time()
+        # 取得した日付だけを出す (時刻は内部には保存してある)
+        day = time.strftime("%m/%d", time.localtime(data.saved_at)) if data.saved_at else ""
+        if data.expired(now):
+            self.status_label.setText(
+                f"（取得 {day}  ·  ストアが更新されました。「更新」を押して最新を取得してください）")
+            self.status_label.setStyleSheet(f"color:{theme.WARN}; font-weight:700;")
+            self._mark_reload(True)
+        else:
+            left = store_reset_seconds(data.daily_ends_at, now)
+            note = f"取得 {day}  ·  ストア更新まで {hours_left_text(left)}"
+            if data.fetch_error:
+                note += "  ·  最新は取得できず"
+            self.status_label.setText(f"（{note}）")
+            self.status_label.setStyleSheet("")
+            self._mark_reload(False)
+        self.status_label.setToolTip(data.fetch_error or "")
+
     def set_store(self, data) -> None:
         self.clear()
+        self._data = data
         now = time.time()
-        saved = time.strftime("%m/%d %H:%M", time.localtime(data.saved_at)) if data.saved_at else ""
-        if data.expired(now):
-            note = f"保存済み {saved}（日替わりは入れ替わっています）"
-        elif data.fetch_error:
-            note = f"保存済み {saved}（最新は取得できず）"
-        elif data.from_saved:
-            note = f"保存済み {saved}"
-        else:
-            note = f"取得 {saved}"
-        if data.daily_ends_at and not data.expired(now):
-            note += f"  ·  日替わり 残り {_short_remaining(data.daily_ends_at - now)}"
-        self.status_label.setText(f"（{note}）")
-        self.status_label.setToolTip(data.fetch_error or "")
+        self._update_status()
 
         def header(text: str) -> None:
             label = QLabel(text)

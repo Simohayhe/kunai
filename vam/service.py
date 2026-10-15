@@ -327,7 +327,12 @@ class StoreData:
     def expired(self, now: float | None = None) -> bool:
         """日替わりの入れ替え時刻を過ぎている (＝今のストアとは違う)。"""
         now = time.time() if now is None else now
-        return bool(self.daily_ends_at) and now >= self.daily_ends_at
+        if self.daily_ends_at:
+            return now >= self.daily_ends_at
+        if self.saved_at:
+            # 入れ替わり時刻が分からないときは、取得が直近の入れ替わり (00:00 UTC) より前か
+            return self.saved_at < now - (now % 86400)
+        return False
 
 
 @dataclass

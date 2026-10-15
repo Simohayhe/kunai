@@ -1815,16 +1815,41 @@ def test_store() -> None:
     from vam.ui.detail_panel import DetailPanel, StoreTab
     QApplication.instance() or QApplication([])
     tab = StoreTab()
+    data.saved_at = _time.time()
     tab.set_store(data)
     texts = [w.text() for w in tab.container.findChildren(QLabel)]
     check("商品名と価格が並ぶ", "プライム ヴァンダル" in texts and "1,775 VP" in texts, str(texts[:6]))
     check("ナイトマーケットとバンドルの見出し", any("ナイトマーケット" in t for t in texts) and "バンドル" in texts)
-    check("取得時刻と残り時間が出る", "残り 1h" in tab.status_label.text() or "残り 2h" in tab.status_label.text(),
-          tab.status_label.text())
+    text = tab.status_label.text()
+    check("取得した日付 (月/日) だけを出し、時刻は出さない",
+          _time.strftime("%m/%d", _time.localtime(data.saved_at)) in text and ":" not in text, text)
+    check("ストアが更新されるまで あと何時間か", "ストア更新まで あと" in text and "時間" in text, text)
+    from vam.ui.detail_panel import hours_left_text, store_reset_seconds
+    check("5 時間 20 分なら あと 5 時間", hours_left_text(5 * 3600 + 20 * 60) == "あと 5 時間")
+    check("1 時間を切ったら 1 時間未満", hours_left_text(1800) == "あと 1 時間未満")
+    check("0 以下はまもなく", hours_left_text(0) == "まもなく")
+    check("時刻不明なら次の 00:00 UTC まで", store_reset_seconds(0, 86400 * 5 + 3600) == 86400 - 3600)
+    check("時刻が分かればそれを使う", store_reset_seconds(1000.0, 400.0) == 600.0)
     old = StoreData(saved_at=_time.time(), daily=[StoreItem(name="a")], daily_ends_at=_time.time() - 10,
                     from_saved=True)
     tab.set_store(old)
-    check("入れ替わり後の保存は、その旨を出す", "入れ替わって" in tab.status_label.text(), tab.status_label.text())
+    check("入れ替わり後は「更新してください」と出す",
+          "更新されました" in tab.status_label.text() and "「更新」を押して" in tab.status_label.text(),
+          tab.status_label.text())
+    check("更新ボタンが目立つ", "border" in tab.reload.styleSheet())
+    tab.set_store(data)
+    check("入れ替わり前は通常表示に戻り、ボタンも元に戻る",
+          "ストア更新まで" in tab.status_label.text() and tab.reload.styleSheet() == "")
+    data.daily_ends_at = _time.time() - 1
+    tab._update_status()
+    check("開いたまま入れ替わりの時刻を過ぎたら、表示が切り替わる",
+          "更新されました" in tab.status_label.text())
+    data.daily_ends_at = _time.time() + 7200
+    from vam.service import StoreData as _SD
+    unknown = _SD(saved_at=1_800_000_000.0 - 2 * 86400, daily=[StoreItem(name="a")])
+    check("入れ替わり時刻が不明でも、取得が昨日以前なら更新済み扱い", unknown.expired(1_800_000_000.0))
+    check("入れ替わり時刻が不明で、取得が今日なら更新済みでない",
+          not _SD(saved_at=1_800_000_000.0, daily=[StoreItem(name="a")]).expired(1_800_000_000.0))
     tab.set_message("メッセージ")
     check("メッセージ表示", any(w.text() == "メッセージ" for w in tab.container.findChildren(QLabel)))
     panel = DetailPanel()
