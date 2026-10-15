@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QListWidget, QListWidgetItem, QRadioButton,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -365,7 +366,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, webhook_url: str, mention: str, step_delay: float,
                 stay_signed_in: bool, henrik_api_key: str, current_version: str,
-                vault: Vault, auto_store: bool = False, parent=None):
+                vault: Vault, auto_store: bool = False, refresh_mode: str = "choose", parent=None):
         super().__init__(parent)
         self.vault = vault
         self.setWindowTitle("設定")
@@ -460,6 +461,21 @@ class SettingsDialog(QDialog):
         self.stay_signed_in.setChecked(stay_signed_in)
         layout.addWidget(self.stay_signed_in)
 
+        # -- 「すべて更新」の動作 --------------------------------------------
+        layout = section("refresh", "「すべて更新」の動作")
+        refresh_desc = QLabel(
+            "「すべて更新」を押したときに、どのアカウントを更新するかを選びます。"
+        )
+        refresh_desc.setObjectName("SubTitle")
+        refresh_desc.setWordWrap(True)
+        layout.addWidget(refresh_desc)
+        self.refresh_all_radio = QRadioButton("ワンクリックで全アカウントを更新する")
+        self.refresh_choose_radio = QRadioButton(
+            "押すと更新するアカウントを選べる (複数選択)")
+        (self.refresh_choose_radio if refresh_mode == "choose" else self.refresh_all_radio).setChecked(True)
+        layout.addWidget(self.refresh_all_radio)
+        layout.addWidget(self.refresh_choose_radio)
+
         # -- ストアの自動取得 -----------------------------------------------
         layout = section("store", "ストアの自動取得")
         store_desc = QLabel(
@@ -543,6 +559,9 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+    def refresh_mode_value(self) -> str:
+        return "choose" if self.refresh_choose_radio.isChecked() else "all"
+
     def auto_store_enabled(self) -> bool:
         return self.auto_store.isChecked()
 
@@ -620,6 +639,134 @@ class SettingsDialog(QDialog):
         self.update_status.setText(f"{tag} が利用できます。")
         self.update_button.setText(f"{tag} に更新")
         self.update_button.setVisible(True)
+
+
+class AccountPickerDialog(QDialog):
+    """「すべて更新」で、更新するアカウントを複数選ぶ。
+
+    今日すでに更新済みのアカウントには印を付け、「更新済みはスキップ」が入のときは
+    選べない (飛ばす) ようにする。
+    """
+
+    def __init__(self, accounts: list, selected_ids: list | None = None,
+                 updated_ids: set | None = None, skip_updated: bool = True, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("更新するアカウントを選ぶ")
+        self.setMinimumSize(440, 460)
+        self.setStyleSheet(theme.STYLESHEET)
+        self._updated = set(updated_ids or ())
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 16)
+
+        title = QLabel("更新するアカウントを選ぶ")
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        desc = QLabel(
+            "選んだアカウントを順番に Riot Client で起動 → 取得 → 停止します "
+            "(ランク・戦績・スキン・ストア)。取得できなかったものは飛ばして続けます。"
+        )
+        desc.setObjectName("SubTitle")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        self.list = QListWidget()
+        wanted = None if selected_ids is None else set(selected_ids)
+        for account in accounts:
+            rank = account.rank.tier_name if account.rank.tier > 2 else ""
+            text = account.display_name + (f"   ·   {rank}" if rank else "")
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, account.id)
+            item.setData(Qt.UserRole + 1, text)                 # 印を付ける前の表示
+            item.setData(Qt.UserRole + 2, wanted is None or account.id in wanted)  # 選んでいたか
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+
+        self.skip_check = QCheckBox("今日更新済みのアカウントはスキップする")
+        self.skip_check.setToolTip(
+            "ストアが入れ替わった (日本時間 9:00) あとに、ランク・戦績・スキン・ストアが全部取れている"
+            "アカウントを、更新の対象から外します。")
+        self.skip_check.setChecked(skip_updated)
+        layout.addWidget(self.skip_check)
+
+        row = QHBoxLayout()
+        select_all = QPushButton("全選択")
+        select_all.setToolTip("更新できるアカウントをすべて選びます")
+        select_all.clicked.connect(lambda: self._set_all(True))
+        row.addWidget(select_all)
+        select_none = QPushButton("全解除")
+        select_none.clicked.connect(lambda: self._set_all(False))
+        row.addWidget(select_none)
+        row.addStretch(1)
+        self.count_label = QLabel()
+        self.count_label.setObjectName("SubTitle")
+        row.addWidget(self.count_label)
+        layout.addLayout(row)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
+        self.buttons.button(QDialogButtonBox.Ok).setText("更新する")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self.list.itemChanged.connect(self._on_item_changed)
+        self.skip_check.toggled.connect(lambda _c: self._apply_skip())
+        self._apply_skip()
+
+    def _apply_skip(self) -> None:
+        """更新済みの扱いを、スキップの入/切に合わせて反映する。"""
+        skip = self.skip_check.isChecked()
+        self.list.blockSignals(True)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            done = item.data(Qt.UserRole) in self._updated
+            base = item.data(Qt.UserRole + 1)
+            if done and skip:
+                item.setText(f"{base}   ✓ 更新済み (スキップ)")
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Unchecked)
+            else:
+                item.setText(base + ("   ✓ 更新済み" if done else ""))
+                item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Checked if item.data(Qt.UserRole + 2) else Qt.Unchecked)
+        self.list.blockSignals(False)
+        self._update_count()
+
+    def _on_item_changed(self, item) -> None:
+        item.setData(Qt.UserRole + 2, item.checkState() == Qt.Checked)   # 選び直しを覚える
+        self._update_count()
+
+    def _set_all(self, checked: bool) -> None:
+        self.list.blockSignals(True)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.flags() & Qt.ItemIsEnabled:       # スキップ中の (更新済み) は触らない
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                item.setData(Qt.UserRole + 2, checked)
+        self.list.blockSignals(False)
+        self._update_count()
+
+    def selected_ids(self) -> list[str]:
+        return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.Checked
+                and self.list.item(i).flags() & Qt.ItemIsEnabled]
+
+    def skip_updated(self) -> bool:
+        return self.skip_check.isChecked()
+
+    def _update_count(self) -> None:
+        n = len(self.selected_ids())
+        skipped = sum(1 for i in range(self.list.count())
+                      if not (self.list.item(i).flags() & Qt.ItemIsEnabled))
+        text = f"{n} / {self.list.count()} 件を選択中"
+        if skipped:
+            text += f"  (更新済み {skipped} 件はスキップ)"
+        self.count_label.setText(text)
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(n > 0)
 
 
 class SetPasswordDialog(QDialog):

@@ -367,6 +367,11 @@ MIN_LOGIN_STEP_DELAY = 0.1
 SETTING_HENRIK_API_KEY = "henrik_api_key"
 SETTING_SORT_MODE = "sort_mode"
 SETTING_AUTO_STORE = "auto_store"
+SETTING_REFRESH_MODE = "refresh_mode"
+SETTING_REFRESH_SELECTION = "refresh_selection"
+SETTING_REFRESH_SKIP_UPDATED = "refresh_skip_updated"
+# 「すべて更新」の動作。choose=押すと更新するアカウントを選ぶ (既定) / all=ワンクリックで全アカウント
+REFRESH_MODES = ("all", "choose")
 SETTING_AUTO_STORE_LAST = "auto_store_last"
 # アカウント一覧の並び順。recent=お気に入り優先・使った順 (既定) / manual=手動 / rank=ランク順 (自動)
 SORT_MODES = ("recent", "manual", "rank")
@@ -1220,6 +1225,8 @@ class AccountService:
                 emit({"kind": "step", "step": step, "state": "error",
                       "error": report.errors[step]})
         ctx.apply_identity()
+        if set(REFRESH_STEPS) <= set(steps) and not report.errors and not report.cancelled:
+            account.last_refreshed_at = time.time()   # 全部取れた = 更新済み
         if len(report.errors) < len(steps) or ctx.authenticated:
             self.vault.update(account)  # 取れた分 (ランク・所持品・ID) を書き戻す
         return report
@@ -1385,6 +1392,48 @@ class AccountService:
         if act["end"] <= now:
             return None   # 終了日が過ぎている (次のアクトの情報がまだ無い)
         return {"name": act["name"], "end": act["end"], "seconds_left": act["end"] - now}
+
+    # -- 「すべて更新」の動作 ----------------------------------------------------
+    @property
+    def refresh_mode(self) -> str:
+        mode = str(self.vault.settings().get(SETTING_REFRESH_MODE, "choose"))
+        return mode if mode in REFRESH_MODES else "choose"
+
+    @refresh_mode.setter
+    def refresh_mode(self, value: str) -> None:
+        if value not in REFRESH_MODES:
+            raise ValueError(value)
+        settings = self.vault.settings()
+        settings[SETTING_REFRESH_MODE] = value
+        self.vault.save_settings(settings)
+
+    @property
+    def refresh_selection(self) -> list[str] | None:
+        """前回選んだアカウント (id)。選んだことが無ければ None (＝全員を選んだ状態から)。"""
+        raw = self.vault.settings().get(SETTING_REFRESH_SELECTION)
+        return [str(x) for x in raw] if isinstance(raw, list) else None
+
+    @refresh_selection.setter
+    def refresh_selection(self, ids: list[str]) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_REFRESH_SELECTION] = list(ids)
+        self.vault.save_settings(settings)
+
+    @property
+    def refresh_skip_updated(self) -> bool:
+        """選択画面で、今日更新済みのアカウントをスキップする (既定は入)。"""
+        return bool(self.vault.settings().get(SETTING_REFRESH_SKIP_UPDATED, True))
+
+    @refresh_skip_updated.setter
+    def refresh_skip_updated(self, value: bool) -> None:
+        settings = self.vault.settings()
+        settings[SETTING_REFRESH_SKIP_UPDATED] = bool(value)
+        self.vault.save_settings(settings)
+
+    def refreshed_today(self, account: Account, now: float | None = None) -> bool:
+        """今日 (ストアが入れ替わる日本時間 9:00 = 00:00 UTC 以降) に、全部取れた更新をしたか。"""
+        now = time.time() if now is None else now
+        return account.last_refreshed_at >= now - (now % 86400)
 
     # -- ストアの自動取得 ------------------------------------------------------
     @property

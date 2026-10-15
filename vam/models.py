@@ -75,6 +75,8 @@ class Account:
     # 復元したが Riot に拒否された。次回は試さず自動ログインへ回す
     session_rejected: bool = False
     last_used_at: float = 0.0
+    # 「すべて更新」で、ランク・戦績・スキン・ストアが全部取れた最後の時刻 (更新済みの判定に使う)
+    last_refreshed_at: float = 0.0
     created_at: float = field(default_factory=time.time)
     rank: RankInfo = field(default_factory=RankInfo)
     wallet: WalletInfo = field(default_factory=WalletInfo)

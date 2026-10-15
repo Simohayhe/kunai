@@ -24,7 +24,7 @@ from . import theme, workers
 from .account_card import AccountCard, AccountListContainer
 from .detail_panel import DetailPanel
 from .dialogs import (
-    AccountDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
+    AccountDialog, AccountPickerDialog, MatchDetailDialog, PlayerSearchDialog, SettingsDialog,
 )
 from .icons import IconLoader
 from .refresh_progress import RefreshProgressBar
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
 
         self._build()
         self.refresh_event.connect(self.refresh_progress.on_event, Qt.QueuedConnection)
+        self._apply_refresh_mode_label()
         self.refresh_event.connect(self._on_refresh_event, Qt.QueuedConnection)
         self._build_tray()
         self._load_rank_icons()
@@ -729,6 +730,7 @@ class MainWindow(QMainWindow):
             current_version=__version__,
             vault=self.vault,
             auto_store=self.service.auto_store,
+            refresh_mode=self.service.refresh_mode,
             parent=self,
         )
         dialog.check_button.clicked.connect(lambda: self._run_update_check(dialog))
@@ -742,6 +744,8 @@ class MainWindow(QMainWindow):
             self.service.stay_signed_in = dialog.stay_signed_in_enabled()
             self.service.henrik_api_key = dialog.henrik_api_key()
             self.service.auto_store = dialog.auto_store_enabled()
+            self.service.refresh_mode = dialog.refresh_mode_value()
+            self._apply_refresh_mode_label()
             self.status.showMessage("設定を保存しました", 4000)
 
     def open_player_search(self) -> None:
@@ -1217,15 +1221,30 @@ class MainWindow(QMainWindow):
                     "セッションが保存されたアカウントがありません。",
                 )
                 return
-            answer = QMessageBox.question(
-                self, "すべて更新",
-                f"{len(accounts)} 件を順番に Riot Client で起動 → 取得 → 停止します。\n"
-                "終わるまで Riot Client は使えません (1 件あたり数十秒かかります)。\n"
-                "取得できなかったものは飛ばして続けます。始めますか？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-            )
-            if answer != QMessageBox.Yes:
-                return
+            if self.service.refresh_mode == "choose":
+                # 更新するアカウントを選ぶ (選んだ内容は次回の初期状態になる)
+                picker = AccountPickerDialog(
+                    accounts, self.service.refresh_selection,
+                    updated_ids={a.id for a in accounts if self.service.refreshed_today(a)},
+                    skip_updated=self.service.refresh_skip_updated, parent=self)
+                if not picker.exec():
+                    return
+                self.service.refresh_skip_updated = picker.skip_updated()
+                chosen = set(picker.selected_ids())
+                self.service.refresh_selection = list(chosen)
+                accounts = [a for a in accounts if a.id in chosen]
+                if not accounts:
+                    return
+            else:
+                answer = QMessageBox.question(
+                    self, "すべて更新",
+                    f"{len(accounts)} 件を順番に Riot Client で起動 → 取得 → 停止します。\n"
+                    "終わるまで Riot Client は使えません (1 件あたり数十秒かかります)。\n"
+                    "取得できなかったものは飛ばして続けます。始めますか？",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+                )
+                if answer != QMessageBox.Yes:
+                    return
         self._cycling = True
         self._cycle_auto = auto
         self._refresh_cancel_event = threading.Event()
@@ -1246,6 +1265,15 @@ class MainWindow(QMainWindow):
             on_error=self._on_refresh_all_failed,
             on_progress=self.status.showMessage,
         )
+
+    def _apply_refresh_mode_label(self) -> None:
+        """ボタンの表示を、動作 (全員 / 選ぶ) に合わせる。"""
+        if self.service.refresh_mode == "choose":
+            self.refresh_all_button.setText("選んで更新…")
+            self.refresh_all_button.setToolTip("更新するアカウントを選んでから、まとめて更新します (Ctrl+Shift+R)")
+        else:
+            self.refresh_all_button.setText("すべて更新")
+            self.refresh_all_button.setToolTip("全アカウントをまとめて更新します (Ctrl+Shift+R)")
 
     def check_auto_store(self) -> None:
         """ストアの自動取得。設定が入で、Riot Client もゲームも止まっていて、

@@ -1961,6 +1961,123 @@ def test_auto_store() -> None:
     check("チェックを外せる", dlg.auto_store_enabled() is False)
 
 
+def test_refresh_picker() -> None:
+    section("「すべて更新」の動作 (全員 / 選ぶ) と更新済みスキップ")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
+    from vam.models import Account
+    from vam.service import REFRESH_STEPS, AccountService, RefreshReport
+    from vam.storage import Vault
+    from vam.ui import main_window as mw
+    from vam.ui.dialogs import AccountPickerDialog, SettingsDialog
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+
+    # ---- 設定
+    check("既定は「押すと選べる」", svc.refresh_mode == "choose")
+    svc.refresh_mode = "all"
+    check("ワンクリック全員に変えられる", AccountService(vault).refresh_mode == "all")
+    try:
+        svc.refresh_mode = "bogus"
+        check("不正な値は拒否", False, "例外が出なかった")
+    except ValueError:
+        check("不正な値は拒否", True)
+    svc.refresh_mode = "choose"
+    check("選択の記憶は最初は無い", svc.refresh_selection is None)
+    svc.refresh_selection = ["a", "b"]
+    check("選択を覚える", AccountService(vault).refresh_selection == ["a", "b"])
+    check("スキップは既定で入", svc.refresh_skip_updated is True)
+    svc.refresh_skip_updated = False
+    check("スキップを切にできる", AccountService(vault).refresh_skip_updated is False)
+
+    # ---- 更新済みの判定 (ストアが入れ替わる 00:00 UTC 以降)
+    now = 1_800_000_000.0 + 3600
+    day_start = now - (now % 86400)
+    a = Account(label="a", last_refreshed_at=day_start + 10)
+    b = Account(label="b", last_refreshed_at=day_start - 10)
+    c = Account(label="c")
+    check("今日更新した分は更新済み", svc.refreshed_today(a, now))
+    check("昨日の更新は更新済みでない", not svc.refreshed_today(b, now))
+    check("一度も更新していなければ更新済みでない", not svc.refreshed_today(c, now))
+
+    # ---- 全部取れたときだけ「更新済み」を記録する
+    acc = Account(label="rec", puuid="p", session_saved=True)
+    vault.add(acc)
+    svc._refresh_rank = lambda *x, **k: None
+    svc._refresh_history = lambda *x, **k: None
+    svc._refresh_skins = lambda *x, **k: None
+    svc._refresh_store = lambda *x, **k: None
+    svc.authenticate = lambda account: (_ for _ in ()).throw(RuntimeError("no auth"))
+    report = svc.refresh_account(acc)
+    check("全部取れたら更新済みの時刻が入る", report.ok and vault.get(acc.id).last_refreshed_at > 0)
+    vault.get(acc.id).last_refreshed_at = 0
+    svc._refresh_skins = lambda *x, **k: (_ for _ in ()).throw(RuntimeError("skin NG"))
+    report = svc.refresh_account(acc)
+    check("1 つでも失敗したら更新済みにしない", not report.ok and vault.get(acc.id).last_refreshed_at == 0)
+    svc._refresh_skins = lambda *x, **k: None
+    svc.refresh_account(acc, steps=("store",))
+    check("ストアだけの更新 (自動取得) は更新済みにしない", vault.get(acc.id).last_refreshed_at == 0)
+
+    # ---- 選択画面
+    QApplication.instance() or QApplication([])
+    accs = [Account(label=n) for n in ("one", "two", "three")]
+    for x in accs:
+        x.id = x.label            # 判りやすい id
+    dlg = AccountPickerDialog(accs, None, updated_ids={"two"}, skip_updated=True)
+    check("既定は更新済み以外が選ばれている", dlg.selected_ids() == ["one", "three"], str(dlg.selected_ids()))
+    check("更新済みに印が付き、選べない",
+          "更新済み" in dlg.list.item(1).text() and not (dlg.list.item(1).flags() & Qt.ItemIsEnabled))
+    check("件数にスキップが出る", "2 / 3" in dlg.count_label.text() and "1 件はスキップ" in dlg.count_label.text(),
+          dlg.count_label.text())
+    dlg._set_all(False)
+    check("全解除", dlg.selected_ids() == [] and not dlg.buttons.button(QDialogButtonBox.Ok).isEnabled())
+    dlg._set_all(True)
+    check("全選択 (スキップ中の更新済みは入らない)", dlg.selected_ids() == ["one", "three"])
+    dlg.skip_check.setChecked(False)
+    check("スキップを切ると更新済みも選べる", dlg.selected_ids() == ["one", "two", "three"] or
+          dlg.selected_ids() == ["one", "three"])
+    dlg._set_all(True)
+    check("スキップ切なら全選択に更新済みも入る", dlg.selected_ids() == ["one", "two", "three"], str(dlg.selected_ids()))
+    dlg.skip_check.setChecked(True)
+    check("スキップを入に戻すと更新済みが外れる", dlg.selected_ids() == ["one", "three"])
+    dlg2 = AccountPickerDialog(accs, ["three"], updated_ids=set())
+    check("前回の選択が初期状態になる", dlg2.selected_ids() == ["three"], str(dlg2.selected_ids()))
+    check("全部外すと「更新する」は押せない",
+          (dlg2._set_all(False), not dlg2.buttons.button(QDialogButtonBox.Ok).isEnabled())[1])
+
+    # ---- 設定画面とボタン表示
+    settings = SettingsDialog(webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+                              henrik_api_key="", current_version="0", vault=vault)
+    check("設定画面の既定は「選べる」", settings.refresh_mode_value() == "choose")
+    settings.refresh_all_radio.setChecked(True)
+    check("ワンクリック全員に切り替えられる", settings.refresh_mode_value() == "all")
+    settings2 = SettingsDialog(webhook_url="", mention="", step_delay=0.5, stay_signed_in=False,
+                               henrik_api_key="", current_version="0", vault=vault, refresh_mode="all")
+    check("現在の値が反映される", settings2.refresh_all_radio.isChecked())
+
+    class FakeButton:
+        text = ""
+        tip = ""
+
+        def setText(self, t):
+            self.text = t
+
+        def setToolTip(self, t):
+            self.tip = t
+
+    class Fake:
+        service = svc
+        refresh_all_button = FakeButton()
+    svc.refresh_mode = "choose"
+    mw.MainWindow._apply_refresh_mode_label(Fake)
+    check("選ぶ動作のときはボタンが「選んで更新…」", Fake.refresh_all_button.text == "選んで更新…")
+    svc.refresh_mode = "all"
+    mw.MainWindow._apply_refresh_mode_label(Fake)
+    check("全員の動作のときはボタンが「すべて更新」", Fake.refresh_all_button.text == "すべて更新")
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -2186,7 +2303,7 @@ def test_ui() -> None:
         # 設定画面: 項目ごとのプルダウン + スクロール
         check("項目は既定で閉じている",
               all(not box.is_expanded() for box in settings1.sections.values()), str(settings1.sections.keys()))
-        check("項目は 6 つ (通知・ログイン・ストア自動取得・検索・パスワード・更新)", len(settings1.sections) == 6)
+        check("項目は 7 つ (通知・ログイン・更新の動作・ストア自動取得・検索・パスワード・更新)", len(settings1.sections) == 7)
         box = settings1.sections["login"]
         box.header.click()
         check("見出しを押すと開く", box.is_expanded() and "▾" in box.header.text())
@@ -2240,7 +2357,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_switch_with_linked_data,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_refresh_picker, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()
