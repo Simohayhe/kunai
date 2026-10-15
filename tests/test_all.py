@@ -2078,6 +2078,106 @@ def test_refresh_picker() -> None:
     check("全員の動作のときはボタンが「すべて更新」", Fake.refresh_all_button.text == "すべて更新")
 
 
+def test_rank_fallbacks() -> None:
+    section("ランクの決め方 (新アクト直後でも「？」にしない)")
+    import time as _time
+    from vam.models import Account
+    from vam.riot import api, auth
+    from vam.service import AccountService
+    from vam.storage import Vault
+
+    vault = Vault(Path(tempfile.mkdtemp()))
+    vault.initialize()
+    svc = AccountService(vault)
+    now = _time.time()
+    day = 86400
+    acts = [{"uuid": "actA", "name": "ACT IV", "start": now - 120 * day, "end": now - 60 * day},
+            {"uuid": "actB", "name": "ACT V", "start": now - 60 * day, "end": now - 1 * day},
+            {"uuid": "actC", "name": "ACT VI", "start": now - 1 * day, "end": now + 80 * day}]
+    svc.content.acts = lambda: acts
+    svc.content.tier_names = lambda: {16: "ゴールド2", 21: "アセンダント1", 0: "アンランク"}
+    snap = {"value": None}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def mmr(self):
+            return snap["value"]
+
+        def wallet(self):
+            return {"vp": 1, "rp": 1, "kc": 1}
+
+    def ctx_for(account):
+        from vam.service import _RefreshContext
+        ctx = _RefreshContext(svc, account)
+        ctx._client = Client()
+        return ctx
+
+    def run(seasons, legacy_tier=0, old_tier=0, old_carried=""):
+        snap["value"] = api.MmrSnapshot(tier=legacy_tier, season_id="actB", seasons=seasons)
+        acc = Account(label="r")
+        acc.rank.tier, acc.rank.carried_from = old_tier, old_carried
+        svc._refresh_rank(acc, ctx_for(acc), lambda m: None)
+        return acc.rank
+
+    # 新アクト (ACT VI) に記録が無くても、前アクトの最終ランクを出す
+    r = run({"actB": {"tier": 16, "rank": 16, "best": 17}})
+    check("前アクトの最終ランク", r.tier == 16 and r.carried_from == "ACT V", str(r))
+    # CompetitiveTier が 0 でも Rank にあればそれを使う
+    r = run({"actB": {"tier": 0, "rank": 16, "best": 17}})
+    check("CompetitiveTier が 0 でも Rank を使う", r.tier == 16 and r.carried_from == "ACT V", str(r))
+    # 最終が分からなければ、届いた最高で代用
+    r = run({"actB": {"tier": 0, "rank": 0, "best": 18}})
+    check("最終が不明なら届いた最高で代用", r.tier == 18 and r.carried_from == "ACT V", str(r))
+    # 直近の前アクトに無ければ、さらに前のアクトまで遡る
+    r = run({"actA": {"tier": 16}, "actB": {"tier": 0}})
+    check("さらに前のアクトまで遡る", r.tier == 16 and r.carried_from == "ACT IV", str(r))
+    # アクト表に無いシーズン ID でも拾う
+    r = run({"unknown-season": {"tier": 21}})
+    check("アクト表に無いシーズンでも拾う", r.tier == 21 and r.carried_from == "前アクト", str(r))
+    # 以前の決め方 (最後に遊んだシーズン) でも取れるなら使う
+    r = run({}, legacy_tier=16)
+    check("以前の決め方で取れるならそれを使う", r.tier == 16 and r.carried_from, str(r))
+    # 今のアクトでランクが付いていれば、それを優先 (前アクトの印は付かない)
+    r = run({"actC": {"tier": 21, "rr": 30, "wins": 3, "games": 5}, "actB": {"tier": 16}})
+    check("今のアクトのランクを優先", r.tier == 21 and r.carried_from == "" and r.rr == 30, str(r))
+    # 本当にランクが無いアカウントは「？」(0)
+    r = run({})
+    check("ランクに行ったことが無ければ未ランク", r.tier == 0 and r.carried_from == "", str(r))
+    # どう調べても出ないが、前に取れていたランクがあるなら、潰さない
+    r = run({}, old_tier=16, old_carried="ACT V")
+    check("前に取れていたランクを「？」で潰さない", r.tier == 16 and r.carried_from == "ACT V", str(r))
+    r = run({}, old_tier=16)
+    check("前回のランクを残すときは前回と分かる印を付ける", r.tier == 16 and r.carried_from == "前回", str(r))
+
+    # アクト表が取れないとき
+    saved = svc.content.acts
+    from vam.riot import content as _content
+
+    def boom():
+        raise _content.ContentError("offline")
+    svc.content.acts = boom
+    try:
+        r = run({"actB": {"tier": 16}})
+        check("アクト表が取れなくても、ランク付きの過去シーズンを使う", r.tier == 16, str(r))
+    finally:
+        svc.content.acts = saved
+
+    # API 側: Rank と WinsByTier の最高を持つ
+    class FakeApi(api.ValorantApi):
+        def __init__(self):
+            super().__init__(auth.AuthResult(access_token="t", puuid="me"), region="ap")
+
+        def _get(self, path):
+            return {"QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {
+                "s1": {"CompetitiveTier": 0, "Rank": 16, "WinsByTier": {"15": 3, "17": 1},
+                       "NumberOfWins": 5, "NumberOfGames": 9, "RankedRating": 40}}}}}
+    snapshot = FakeApi().mmr()
+    check("シーズンごとに Rank と届いた最高を持つ",
+          snapshot.seasons["s1"]["rank"] == 16 and snapshot.seasons["s1"]["best"] == 17, str(snapshot.seasons))
+
+
 def test_status_notify() -> None:
     section("障害通知")
     from vam.models import Account
@@ -2357,7 +2457,7 @@ def main() -> int:
                test_autologin_geometry,
                test_session_renewal, test_api_parsing, test_auth_helpers,
                test_content, test_inventory_summary, test_match_cache,
-               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_refresh_picker, test_switch_with_linked_data,
+               test_match_stats_api_mode, test_history_persistence, test_bulk_refresh, test_refresh_cycle, test_sort_modes, test_act_status, test_browser_open, test_borrowed_history, test_match_extras, test_riot_data_links, test_store, test_auto_store, test_refresh_picker, test_rank_fallbacks, test_switch_with_linked_data,
                test_status_notify, test_ui):
         try:
             fn()

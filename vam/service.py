@@ -1583,14 +1583,24 @@ class AccountService:
         progress(f"{account.display_name}: ランクを取得中…")
         mmr = client.mmr()
         names = self.content.tier_names()  # 日本語の表示名を優先
-        cur_tier, cur_rr, cur_wins, cur_games, cur_lb = (
-            mmr.tier, mmr.rr, mmr.wins, mmr.games, mmr.leaderboard_rank)
+        legacy = (mmr.tier, mmr.rr, mmr.wins, mmr.games, mmr.leaderboard_rank)
+        cur_tier, cur_rr, cur_wins, cur_games, cur_lb = legacy
         carried_from = ""
+
+        def final_tier(info: dict) -> int:
+            """そのシーズンの最終ランク。CompetitiveTier が 0 でも Rank に入っていればそれ。"""
+            return max(info.get("tier", 0) or 0, info.get("rank", 0) or 0)
+
+        def reached_tier(info: dict) -> int:
+            """最終ランクが分からないとき、そのシーズンで届いた最高ランク (代わりに使う)。"""
+            return max(final_tier(info), info.get("best", 0) or 0)
+
         acts = []
         try:
             acts = self.content.acts()
         except content.ContentError:
             pass
+        act_ids = {a["uuid"] for a in acts}
         if acts:
             # 「今のアクト」はカレンダーで決める。mmr の LatestCompetitiveUpdate は
             # 最後に遊んだ試合のシーズンなので、新アクトの開始直後は古いまま。
@@ -1598,21 +1608,40 @@ class AccountService:
             current_idx = max((i for i, a in enumerate(acts) if a["start"] <= now), default=-1)
             if current_idx >= 0:
                 this = mmr.seasons.get(acts[current_idx]["uuid"]) or {}
-                cur_tier, cur_rr = this.get("tier", 0), this.get("rr", 0)
+                cur_tier, cur_rr = final_tier(this), this.get("rr", 0)
                 cur_wins, cur_games = this.get("wins", 0), this.get("games", 0)
                 cur_lb = this.get("leaderboard", 0)
             if cur_tier <= 2:
-                for a in reversed(acts[:max(current_idx, 0)]):
-                    prev = mmr.seasons.get(a["uuid"]) or {}
-                    if prev.get("tier", 0) > 2:
-                        cur_tier, cur_rr, carried_from = prev["tier"], 0, a["name"]
+                previous = list(reversed(acts[:max(current_idx, 0)]))
+                # 1) 直近のランク付きアクトの最終ランク  2) 最終が分からなければ届いた最高
+                for measure in (final_tier, reached_tier):
+                    for a in previous:
+                        value = measure(mmr.seasons.get(a["uuid"]) or {})
+                        if value > 2:
+                            cur_tier, cur_rr, carried_from = value, 0, a["name"]
+                            break
+                    if carried_from:
                         break
-        elif cur_tier <= 2:
-            # アクト表が取れないときは、ランク付きの過去シーズンのどれかを使う
+        if cur_tier <= 2:
+            # アクト表に無いシーズンや、アクト表が取れないとき: ランク付きの過去シーズンのどれか
             for info in reversed(list(mmr.seasons.values())):
-                if info.get("tier", 0) > 2:
-                    cur_tier, cur_rr, carried_from = info["tier"], 0, "前アクト"
+                value = reached_tier(info)
+                if value > 2:
+                    cur_tier, cur_rr, carried_from = value, 0, "前アクト"
                     break
+        if cur_tier <= 2 and legacy[0] > 2:
+            # 以前の決め方 (最後に遊んだシーズンのランク) なら取れる
+            cur_tier, cur_rr, cur_wins, cur_games, cur_lb = legacy
+            carried_from = carried_from or "前アクト"
+        if cur_tier <= 2:
+            # 原因を調べられるよう、判定の材料をログに残す (シーズン: (最終, Rank, 届いた最高))
+            diagnostics.log(
+                f"ランクが出ない: {account.display_name} 前回={account.rank.tier} "
+                f"seasons={ {k[:8]: (v.get('tier'), v.get('rank'), v.get('best')) for k, v in mmr.seasons.items()} }")
+        if cur_tier <= 2 and account.rank.tier > 2:
+            # どう調べても出ないとき、前に取れていたランクを「？」で潰さない
+            cur_tier, cur_rr = account.rank.tier, 0
+            carried_from = account.rank.carried_from or "前回"
         account.rank = RankInfo(
             tier=cur_tier, tier_name=names.get(cur_tier, api.tier_name(cur_tier)), rr=cur_rr,
             peak_tier=mmr.peak_tier,

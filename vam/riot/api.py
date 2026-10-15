@@ -232,8 +232,12 @@ class ValorantApi:
             snap.leaderboard_rank = current.get("LeaderboardRank", 0) or 0
 
         for season_id, info in seasons.items():
+            wins_by_tier = info.get("WinsByTier") or {}
             snap.seasons[season_id] = {
                 "tier": info.get("CompetitiveTier", 0),
+                # CompetitiveTier が 0 でも Rank に入っていることがある / そのシーズンで届いた最高
+                "rank": info.get("Rank", 0) or 0,
+                "best": max((int(t) for t in wins_by_tier), default=0),
                 "rr": info.get("RankedRating", 0),
                 "wins": info.get("NumberOfWins", 0),
                 "games": info.get("NumberOfGames", 0),
